@@ -1,5 +1,5 @@
 # QUANT DASHBOARD (FX + Macro) — dependencias.
-# Pins del venv verificado en Arch (Python 3.14), 2026-08-29.
+# Pins verificados en Arch y macOS (Python 3.14), 2026-08-29.
 yfinance==1.7.0
 pandas==3.0.5
 numpy==2.5.2
@@ -7,6 +7,7 @@ matplotlib==3.11.1
 seaborn==0.13.2
 scipy==1.18.1
 statsmodels==0.15.0
+scikit-learn==1.9.0
 arch==8.0.0
 fredapi==0.5.2
 requests==2.34.2

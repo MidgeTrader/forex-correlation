@@ -43,7 +43,7 @@ salvo para forzar una descarga completa.
 ## API de FRED (opcional)
 
 El Real Yield Differential usa inflación de FRED. Configura tu key en una
-variable de entorno `FRED_API_KEY` o en un `.env` (nunca se sube). Sin key,
+variable de entorno `FRED_API_KEY` o en un `.env` . Sin key,
 esas filas se muestran como N/A y el carry usa los últimos tipos de reserva
 verificados.
 

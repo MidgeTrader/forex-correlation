@@ -1,3 +1,6 @@
+import math
+import time
+
 import pandas as pd
 import yfinance as yf
 import seaborn as sns
@@ -18,6 +21,62 @@ try:
 except ImportError:
     pass
 from scipy.stats import norm
+
+# --- UTILIDADES DE ROBUSTEZ ---
+
+def _f(value) -> float | None:
+    """Convierte a float; ``None`` si no es finito (NaN/inf) o no convertible.
+
+    Evita que ``NaN``/``Infinity`` se cuelen en los ``json.dumps`` del HTML
+    (``NaN`` es JSON inválido) o se muestren como "nan%" en las cards.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _retorno(data_close, col, n):
+    """Retorno % de la columna en ``n`` sesiones; ``None`` si faltan datos.
+
+    Usa ``.dropna()`` (la serie ya va ``ffill``-eada) para que ``iloc[-n]`` no
+    crashee cuando la serie es corta.
+    """
+    serie = data_close[col].dropna()
+    if len(serie) < n + 1:
+        return None
+    return _f((serie.iloc[-1] / serie.iloc[-n] - 1) * 100)
+
+
+def _descarga_con_reintentos(descargar, intentos=3, espera_base=0.5):
+    """Ejecuta una descarga de yfinance con reintentos + backoff exponencial.
+
+    Args:
+        descargar: Callable sin argumentos que devuelve un DataFrame.
+        intentos: Número de intentos (por defecto 3).
+        espera_base: Espera base en segundos (0.5 → 1 → 2).
+
+    Returns:
+        El DataFrame si la descarga devuelve algo no vacío.
+
+    Raises:
+        La última excepción de yfinance, o ``RuntimeError`` si las descargas
+        devolvieron vacío.
+    """
+    ultimo_error = None
+    for i in range(intentos):
+        try:
+            df = descargar()
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:  # yfinance lanza excepciones variadas (429, red)
+            ultimo_error = e
+        time.sleep(espera_base * (2 ** i))
+    if ultimo_error is not None:
+        raise ultimo_error
+    raise RuntimeError("La descarga devolvió vacío tras varios intentos")
+
 
 # --- FUNCIONES ESTOCÁSTICAS AVANZADAS ---
 
@@ -244,7 +303,7 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     start_date = end_date - pd.DateOffset(years=2)
     
     try:
-        raw_data = yf.download(symbols, start=start_date, end=end_date, progress=False)
+        raw_data = _descarga_con_reintentos(lambda: yf.download(symbols, start=start_date, end=end_date, progress=False))
         data_close = (raw_data['Adj Close'] if 'Adj Close' in raw_data.columns else raw_data['Close']).ffill()
         highs = raw_data['High'].ffill()
         lows = raw_data['Low'].ffill()
@@ -416,8 +475,12 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     prices_1w = data_close.resample('W').last().tail(100)
     
     # 1h (máximo 730 días permitido por yfinance)
-    raw_1h = yf.download(symbols, period="1y", interval="1h", progress=False)
-    prices_1h_all = (raw_1h['Adj Close'] if 'Adj Close' in raw_1h.columns else raw_1h['Close']).ffill()
+    try:
+        raw_1h = _descarga_con_reintentos(lambda: yf.download(symbols, period="1y", interval="1h", progress=False))
+        prices_1h_all = (raw_1h['Adj Close'] if 'Adj Close' in raw_1h.columns else raw_1h['Close']).ffill()
+    except Exception as e:
+        print(f"Error descargando temporalidades 1h: {e}")
+        return
     
     # Limpiar columnas 1h
     prices_1h_all.columns = [c.replace('=X', '') for c in prices_1h_all.columns]
@@ -455,13 +518,13 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     monthly_levels = {}
     for col in data_close.columns:
         p_m = data_close[col].tail(22)
-        ref_price = float(p_m.iloc[0])  # Precio de apertura del periodo (igual que en Resumen)
-        high_22   = float(highs[col].tail(22).max())
-        low_22    = float(lows[col].tail(22).min())
+        ref_price = _f(p_m.iloc[0]) or 0.0  # Precio de apertura del periodo (igual que en Resumen)
+        high_22   = _f(highs[col].tail(22).max()) or 0.0
+        low_22    = _f(lows[col].tail(22).min()) or 0.0
 
         # Estos % coinciden exactamente con lo que muestra el panel Resumen
-        pct_high = round((high_22 - ref_price) / ref_price * 100, 2)
-        pct_low  = round((low_22  - ref_price) / ref_price * 100, 2)
+        pct_high = round((high_22 - ref_price) / ref_price * 100, 2) if ref_price else 0.0
+        pct_low  = round((low_22  - ref_price) / ref_price * 100, 2) if ref_price else 0.0
 
         monthly_levels[col] = {
             "proj_high": round(high_22, 5),
@@ -503,11 +566,11 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
         best_dow = vol_seasonality_dow[col].idxmax() if not vol_seasonality_dow[col].isna().all() else "N/A"
         
         # Sesgos (Largo/Corto)
-        ret_20d = (data_close[col].iloc[-1] / data_close[col].iloc[-20] - 1) * 100
+        ret_20d = _retorno(data_close, col, 20) or 0.0
         bias_20d = "LARGO" if ret_20d > 0 else "CORTO"
         bias_20d_color = "#3fb950" if bias_20d == "LARGO" else "#f85149"
-        
-        ret_5d = (data_close[col].iloc[-1] / data_close[col].iloc[-5] - 1) * 100
+
+        ret_5d = _retorno(data_close, col, 5) or 0.0
         bias_5d = "LARGO" if ret_5d > 0 else "CORTO"
         bias_5d_color = "#3fb950" if bias_5d == "LARGO" else "#f85149"
         
@@ -756,7 +819,7 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     # Agregar Instrumentos y acumular su tamaño en el padre y en el root
     for col in data_close.columns:
         bc = col[:3]
-        last_ret = float(returns[col].iloc[-1] * 100)
+        last_ret = _f(returns[col].iloc[-1] * 100) or 0.0
         ids.append(f"inst-{col}")
         labels.append(col)
         parents.append(f"cur-{bc}")
@@ -799,7 +862,7 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
 
     for col in pair_list:
         bc = col[:3]
-        impact = abs(float(returns[col].iloc[-1] * 100))
+        impact = abs(_f(returns[col].iloc[-1] * 100) or 0.0)
         if impact < 0.001: impact = 0.01 # Gracia visual
         s_sources.append(node_indices[f"cur-{bc}"])
         s_targets.append(node_indices[f"pair-{col}"])
@@ -866,8 +929,8 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     <head>
         <meta charset="UTF-8">
         <title>Quant Dashboard</title>
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js" integrity="sha512-WoViKhKD4qI2WruSZqv9+kvM4WfFhUMQCLN4QlDTt5aU56fLQy2gYoxWIqlEnXqJy/+Ac5q/hk1oWfqnMDhwMA==" crossorigin="anonymous"></script>
+        <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" integrity="sha512-2yjH2FQFIKp1XQ8nSWes+7/zWAPc9qfDolxFGJV1BUO7/+YIAPh1jICUN6TaA+VVlfabERCqo1Hji0yYTFtDew==" crossorigin="anonymous"></script>
         <style>
             body {{ font-family: 'Segoe UI', sans-serif; background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 10px; }}
             .container {{ max-width: 1950px; margin: auto; }}

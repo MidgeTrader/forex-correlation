@@ -22,6 +22,30 @@ scripts/backtesting.py
 scripts/backtesting_v2.py
 scripts/optimization.py
 
+# Copias de respaldo — nunca al repositorio
+*.backup.py
+*_backup_*.py
+*.bak
+*.orig
+
+# Secretos y configs con credenciales
+*.key
+*.pem
+secrets.json
+config.json
+.env.*
+!.env.example
+
+# Logs y basura del sistema/editor
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# Cachés de herramientas
+.pytest_cache/
+.mypy_cache/
+
 # Python
 __pycache__/
 *.pyc

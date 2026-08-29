@@ -201,9 +201,11 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
     closes = data.price_data["Close"].dropna()
 
     # Retornos que los motores no calculan: 1D y YTD (2 líneas).
-    retorno_1d = closes.iloc[-1] / closes.iloc[-2] - 1
-    primer_anio = closes.index[-1].year
-    retorno_ytd = closes.iloc[-1] / closes[closes.index.year == primer_anio].iloc[0] - 1
+    # Guardas de longitud: con series cortas o a 1 de enero no hay dato → N/A.
+    retorno_1d = closes.iloc[-1] / closes.iloc[-2] - 1 if len(closes) >= 2 else None
+    primer_anio = closes.index[-1].year if len(closes) else None
+    ytd_serie = closes[closes.index.year == primer_anio] if primer_anio is not None else pd.Series(dtype=float)
+    retorno_ytd = closes.iloc[-1] / ytd_serie.iloc[0] - 1 if not ytd_serie.empty else None
 
     precio_html = fmt_precio(market.current_price)
     ret1d_html = (

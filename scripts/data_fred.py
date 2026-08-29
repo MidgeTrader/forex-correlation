@@ -66,8 +66,8 @@ def _load_api_key() -> Optional[str]:
         env_file = _PROJECT_DIR / ".env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():
-                if line.startswith("FRED_API_KEY="):
-                    key = line.split("=", 1)[1].strip()
+                if line.split("=", 1)[0].strip() == "FRED_API_KEY":
+                    key = line.split("=", 1)[1].split("#", 1)[0].strip()
 
     return key or None
 
@@ -116,8 +116,10 @@ def datos_tipos() -> tuple[dict[str, float], str]:
             # Fallo seguro por divisa: reserva verificada en vez de N/A.
             tipos[divisa] = valor if valor is not None else TIPOS_RESERVA[divisa]
         return tipos, "FRED"
-    except Exception:
-        # Sin red / API caída: el dashboard sigue con los últimos conocidos.
+    except Exception as e:
+        # Sin red / API caída / key inválida: el dashboard sigue con los últimos
+        # conocidos, pero se avisa para que no parezca que FRED respondió bien.
+        print(f"  [aviso] FRED no respondió; usando valores de reserva ({type(e).__name__})")
         return dict(TIPOS_RESERVA), "reserva"
 
 

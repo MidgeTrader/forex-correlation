@@ -187,6 +187,12 @@ def generar_dashboard(refresh: bool = False) -> str:
         macro_categorias=_macro_categorias(),
     )
 
+    if fx_html is None:
+        raise RuntimeError(
+            "La sección FX no se pudo generar (fallo al descargar datos de Yahoo). "
+            "Revisa la conexión a internet o la caché en data/."
+        )
+
     head_fx = re.search(r"<head>(.*?)</head>", fx_html, re.S).group(1)
     body_fx = re.search(r"<body>(.*?)</body>", fx_html, re.S).group(1)
 

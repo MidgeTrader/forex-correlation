@@ -1,0 +1,27 @@
+# Entorno
+.venv/
+
+# Datos descargados y caché regenerable
+data/
+
+# Secretos — nunca al repositorio (FRED_API_KEY, etc.)
+.env
+
+# Artefactos generados
+forex_dashboard.html
+
+# Estrategias de scalping y resultados de backtest (no se publican)
+estrategias/
+results/
+*.bat
+README_estrategias.txt
+RESUMEN_ESTRATEGIAS_MULTIPLES.md
+
+# Backtesting de señales de trading (no se publican)
+scripts/backtesting.py
+scripts/backtesting_v2.py
+scripts/optimization.py
+
+# Python
+__pycache__/
+*.pyc

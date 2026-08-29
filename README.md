@@ -14,6 +14,10 @@ dependencias privadas**: clonar, instalar y generar es todo lo que hace falta.
   (Sharpe, Sortino, Beta, R², Alpha, probabilidades bootstrap).
 - **Gráficas**: dashboard interactivo FX (Chart.js / Plotly).
 
+## Vista previa
+
+![Dashboard de correlaciones FX + macro](docs/screenshots/dashboard.png)
+
 ## Cómo generar el dashboard
 
 Requisitos: Python 3.11+ (recomendado 3.12–3.14) y conexión a internet para

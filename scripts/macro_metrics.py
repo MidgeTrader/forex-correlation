@@ -191,6 +191,7 @@ def metricas_returns(prices: pd.Series) -> ReturnsMetrics:
 
 @dataclass
 class StatisticsMetrics:
+    variance: Optional[float] = None
     skewness: Optional[float] = None
     kurtosis: Optional[float] = None
     pct_daily_p5: Optional[float] = None
@@ -205,6 +206,7 @@ def metricas_statistics(prices: pd.Series) -> StatisticsMetrics:
     if len(returns) < 30:
         return s
 
+    s.variance = float(returns.var())
     s.skewness = float(returns.skew())
     s.kurtosis = float(returns.kurt())
 

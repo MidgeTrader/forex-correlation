@@ -82,6 +82,13 @@ def fmt_num(valor: Optional[float], decimales: int = 2) -> str:
     return f"{valor:.{decimales}f}"
 
 
+def fmt_var_diaria(valor: Optional[float]) -> str:
+    """Varianza diaria en % con 3 decimales (fracción muy pequeña), o N/A."""
+    if _es_na(valor):
+        return "N/A"
+    return f"{valor * 100:.3f}%"
+
+
 def fmt_dias(valor: Optional[float]) -> str:
     """Duración en días (entero) o N/A."""
     if _es_na(valor):
@@ -247,6 +254,7 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
                   f"{fmt_precio(media_50s + 2 * sigma_50s)} - {fmt_precio(media_50s - 2 * sigma_50s)}"),
         ]
         filas_forma = [
+            _fila("Varianza diaria", fmt_var_diaria(statistics.variance)),
             _fila("Skewness", fmt_num(statistics.skewness)),
             _fila("Kurtosis (exceso)", fmt_num(statistics.kurtosis)),
             _fila("Tail Ratio", fmt_num(_tail_ratio(closes.pct_change().dropna()))),

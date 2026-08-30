@@ -788,6 +788,10 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
 
     # 11. Estructura Jerárquica para Sunburst (Market Performance)
     # Jerarquía: Market -> Base Currency -> Instrument.
+    # Solo los pares FX: los activos macro (índices, metales, agro...) no
+    # aportan al mapa de rendimiento y quedan fuera del sunburst (los macro
+    # no están en macro_categorias -> "fx"). La lista fx_pairs se reutiliza
+    # en el Sankey de la sección 12.
     # Los ids llevan prefijo ("cur-"/"inst-") para que un instrumento de 3
     # letras (p.ej. SPX, NDX, DAX, DXY) no colisione con su propia "moneda
     # base" (col[:3]); Plotly no dibuja sunbursts con ids duplicados.
@@ -796,8 +800,16 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     # hijos, y si el padre vale 0 no queda nada que dibujar (consola:
     # "children sum = N"). El root vale 35 y cada moneda base, su nº de
     # instrumentos.
+    if macro_categorias:
+        fx_pairs = sorted(
+            col for col in data_close.columns
+            if macro_categorias.get(col, "fx") == "fx"
+        )
+    else:
+        fx_pairs = sorted(data_close.columns.tolist())
+
     base_currencies = set()
-    for col in data_close.columns:
+    for col in fx_pairs:
         base_currencies.add(col[:3])
 
     ids = ["Market"]
@@ -817,7 +829,7 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
         hovers.append(f"Currency: {bc}")
 
     # Agregar Instrumentos y acumular su tamaño en el padre y en el root
-    for col in data_close.columns:
+    for col in fx_pairs:
         bc = col[:3]
         last_ret = _f(returns[col].iloc[-1] * 100) or 0.0
         ids.append(f"inst-{col}")
@@ -841,14 +853,14 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     }
     market_hierarchy_json = json.dumps(hierarchy_data)
 
-    # 12. Datos para Sankey (Flujo de Impacto de Mercado) - Global
+    # 12. Datos para Sankey (Flujo de Impacto de Mercado) - Solo FX
     # Fuentes: Monedas Base -> Pares.
     # Igual que en el sunburst, los ids internos llevan prefijo ("cur-"/"pair-")
     # para que un instrumento de 3 letras (SPX, NDX, DAX, DXY) no colisione con
     # su propia "moneda base": sin prefijo aparecía dos veces y el enlace era
     # SPX -> SPX (self-loop), que Plotly no dibuja.
-    base_list = sorted(list(base_currencies))
-    pair_list = sorted(data_close.columns.tolist())
+    pair_list = fx_pairs  # misma lista filtrada a FX que en el sunburst
+    base_list = sorted({col[:3] for col in pair_list})
     cur_nodes = [f"cur-{b}" for b in base_list]
     pair_nodes = [f"pair-{p}" for p in pair_list]
     all_nodes = cur_nodes + pair_nodes

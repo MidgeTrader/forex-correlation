@@ -20,11 +20,12 @@ CATEGORIAS: Final[dict[str, str]] = {
     "energia": "Energía",
     "indices": "Índices",
     "agro": "Agro",
+    "crypto": "Crypto",
     "fx": "FX",
 }
 
 # Orden de las categorías en la barra (el generador añade "graficas" al final).
-CATEGORIAS_ORDER: Final[list[str]] = ["metales", "energia", "indices", "agro", "fx"]
+CATEGORIAS_ORDER: Final[list[str]] = ["metales", "energia", "indices", "agro", "crypto", "fx"]
 
 # Benchmark por defecto según la categoría: índice → SPY, agro → DBA
 # (índice de futuros agrícolas), metales → DBP (preciosos), energía → DBE,
@@ -36,8 +37,30 @@ DEFAULT_BENCHMARK: Final[dict[str, str]] = {
     "energia": "DBE",
     "indices": "SPY",
     "agro": "DBA",
+    "crypto": "NCI",
     "fx": "DX-Y.NYB",
 }
+
+# Días de negociación por año según la categoría. Los pares FX y los activos
+# macro cotizan ~252 sesiones hábiles; las criptomonedas negocian TODOS los
+# días (365). Afecta a la anualización de la volatilidad (√365 en vez de
+# √252), a las ventanas 1M/1Y (30/365 días) y a la duración del "mes" en el
+# canal log del dashboard. Cualquier categoría ausente se asume 252.
+DIAS_ANIO: Final[dict[str, int]] = {
+    "crypto": 365,
+}
+
+
+def dias_anio_de(categoria: str) -> int:
+    """Días de negociación por año de una categoría (252 por defecto).
+
+    Args:
+        categoria: Clave de categoría (``crypto``, ``metales``, ...).
+
+    Returns:
+        Días de trading al año (365 para crypto, 252 para el resto).
+    """
+    return DIAS_ANIO.get(categoria, 252)
 
 # Etiqueta legible de un ticker de benchmark (para las tarjetas).
 BENCHMARK_LABELS: Final[dict[str, str]] = {
@@ -99,6 +122,14 @@ MACRO_ASSETS: Final[dict[str, dict[str, str]]] = {
     "EURGBP": {"categoria": "fx", "label": "EUR/GBP", "ticker_yf": "EURGBP=X"},
     "EURJPY": {"categoria": "fx", "label": "EUR/JPY", "ticker_yf": "EURJPY=X"},
     "GBPJPY": {"categoria": "fx", "label": "GBP/JPY", "ticker_yf": "GBPJPY=X"},
+    # Criptomonedas (categoría crypto, añadidas 2026-08-30): cotizan los 365
+    # días del año y su benchmark es el Nasdaq Crypto Index (NCI), descargado
+    # de la API pública de nasdaq.com (ver macro_data._nci_historico).
+    "BTC": {"categoria": "crypto", "label": "Bitcoin", "ticker_yf": "BTC-USD"},
+    "ETH": {"categoria": "crypto", "label": "Ethereum", "ticker_yf": "ETH-USD"},
+    "BNB": {"categoria": "crypto", "label": "BNB", "ticker_yf": "BNB-USD"},
+    "XRP": {"categoria": "crypto", "label": "XRP", "ticker_yf": "XRP-USD"},
+    "SOL": {"categoria": "crypto", "label": "Solana", "ticker_yf": "SOL-USD"},
 }
 
 

@@ -224,7 +224,8 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
     # En los pares FX, la fila "Drawdown máximo" se sustituye por el Carry
     # (diferencial de tipos base − cotizada, tipos actuales de FRED vía
     # data_fred; fallo seguro a los últimos verificados). Los activos macro
-    # (metales, índices...) no tienen carry: conservan el drawdown máximo.
+    # (metales, índices...) y las criptomonedas no tienen carry: conservan el
+    # drawdown máximo.
     if data.categoria == "fx":
         tipos_fx, _ = datos_tipos()
         carry = carry_de_par(key, tipos=tipos_fx)
@@ -238,12 +239,13 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
     else:
         fila_carry = _fila("Drawdown máximo", fmt_pct_frac(market.max_drawdown, signo=True))
 
-    # En los pares FX se sustituyen métricas de las cards: "Retorno acumulado"
-    # → media de 50 semanas + canales 1σ/2σ, y Sharpe/Sortino → forma de la
-    # distribución (Skewness, Kurtosis exceso, Tail Ratio). Los activos macro
-    # conservan sus filas originales.
-    if data.categoria == "fx":
-        ventana_50s = closes.tail(250)  # 50 semanas × 5 sesiones
+    # En los pares FX y las criptomonedas se sustituyen métricas de las cards:
+    # "Retorno acumulado" → media de 50 semanas + canales 1σ/2σ, y
+    # Sharpe/Sortino → forma de la distribución (Skewness, Kurtosis exceso,
+    # Tail Ratio). Los activos macro conservan sus filas originales.
+    if data.categoria in ("fx", "crypto"):
+        # 50 semanas × días de negociación por semana (5 en 252, 7 en 365).
+        ventana_50s = closes.tail(50 * round(data.dias_anio / 52))
         media_50s = ventana_50s.mean()
         sigma_50s = ventana_50s.std()
         filas_reemplazo = [
@@ -261,10 +263,22 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
             _fila("VaR 95%", fmt_pct_frac(statistics.pct_daily_p5, signo=True)),
             _fila("CVaR 95%", fmt_pct_frac(statistics.cvar_95, signo=True)),
         ]
-        # Real yield differential = (tipo nominal − inflación YoY) base − cotizada.
-        # La inflación (FRED) solo está si hay key y la serie responde; si alguna
-        # divisa no tiene (AUD/NZD no publican IPC mensual en FRED), la fila se
-        # muestra con N/A honesto — nada se inventa.
+    else:
+        filas_reemplazo = [
+            _fila("Retorno acumulado", fmt_pct_frac(returns.cumulative_return, signo=True)),
+        ]
+        filas_forma = [
+            _fila("Sharpe", fmt_num(market.sharpe)),
+            _fila("Sortino", fmt_num(market.sortino_ratio)),
+        ]
+
+    # Real yield differential = (tipo nominal − inflación YoY) base − cotizada.
+    # Solo aplica a pares de divisas (par FX); las criptomonedas no tienen
+    # tipos de interés y no llevan esta fila. La inflación (FRED) solo está si
+    # hay key y la serie responde; si alguna divisa no tiene (AUD/NZD no
+    # publican IPC mensual en FRED), la fila se muestra con N/A honesto — nada
+    # se inventa.
+    if data.categoria == "fx":
         inflacion = datos_inflacion()
         base, cotizada = key[:3], key[3:6]
         real_base = (tipos_fx[base] - inflacion[base]
@@ -277,13 +291,6 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
             valor_yield = "N/A"
         filas_yield = [_fila("Real Yield Differential", valor_yield)]
     else:
-        filas_reemplazo = [
-            _fila("Retorno acumulado", fmt_pct_frac(returns.cumulative_return, signo=True)),
-        ]
-        filas_forma = [
-            _fila("Sharpe", fmt_num(market.sharpe)),
-            _fila("Sortino", fmt_num(market.sortino_ratio)),
-        ]
         filas_yield = []
 
     filas = [

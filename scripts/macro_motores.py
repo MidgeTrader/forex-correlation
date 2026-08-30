@@ -37,6 +37,6 @@ def analizar_activo(
     closes = data.price_data["Close"].dropna()
     benchmark = data.spy_data["Close"].dropna() if data.spy_data is not None else None
 
-    results = metricas(closes, benchmark)
+    results = metricas(closes, benchmark, dias_anio=data.dias_anio)
 
     return {"data": data, "results": results}

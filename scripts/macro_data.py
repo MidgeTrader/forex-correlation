@@ -23,10 +23,11 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 from pandas.tseries.offsets import BDay
 
-from macro_catalogo import MACRO_ASSETS, benchmark_de
+from macro_catalogo import MACRO_ASSETS, benchmark_de, dias_anio_de
 
 # Caché en disco: `data/` en la raíz del proyecto (un nivel por encima de scripts/).
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -164,6 +165,9 @@ class MacroDataYF:
         self.benchmark_yf = benchmark or benchmark_de(key)
         self.label = spec["label"]
         self.categoria = spec["categoria"]
+        # Días de negociación al año (365 en crypto, 252 en el resto): anualiza
+        # la volatilidad y define las ventanas 1M/1Y y el "mes" del canal log.
+        self.dias_anio = dias_anio_de(self.categoria)
         self.refresh = refresh
 
         self.price_data: Optional[pd.DataFrame] = None
@@ -232,17 +236,22 @@ class MacroDataYF:
     def _dato_benchmark(self) -> pd.DataFrame:
         """Serie del benchmark para las métricas.
 
-        El DXY (``DX-Y.NYB``) se RECONSTRUYE con la fórmula de ICE desde sus
-        6 pares componentes en lugar de usar la serie que entrega Yahoo: la de
-        Yahoo tiene retornos diarios casi descorrelacionados del mercado
-        (validado el 2026-08-28: corr con EURUSD −0.09 vs −0.97 reconstruido),
-        aunque sus niveles sean correctos. El resto de benchmarks (SPY, DBA,
-        DBP, DBB, DBE) se descarga tal cual.
+        Dos casos especiales que Yahoo no entrega bien:
+          - El DXY (``DX-Y.NYB``) se RECONSTRUYE con la fórmula de ICE desde sus
+            6 pares componentes en lugar de usar la serie que entrega Yahoo: la
+            de Yahoo tiene retornos diarios casi descorrelacionados del mercado
+            (validado el 2026-08-28: corr con EURUSD −0.09 vs −0.97
+            reconstruido), aunque sus niveles sean correctos.
+          - El NCI (Nasdaq Crypto Index) no tiene histórico en Yahoo (solo el
+            último cierre) y se descarga de la API pública de nasdaq.com.
+        El resto de benchmarks (SPY, DBA, DBP, DBB, DBE) se descarga tal cual.
 
         Returns:
             DataFrame con columna ``Close``, o vacío si el benchmark no pudo
             obtenerse (fallo seguro → la métrica devuelve N/A).
         """
+        if self.benchmark_yf == "NCI":
+            return self._nci_historico()
         if self.benchmark_yf != "DX-Y.NYB":
             return self._serie_con_cache(self.benchmark_yf, self.period)
         return self._dxy_reconstruido()
@@ -294,6 +303,69 @@ class MacroDataYF:
             return out
         except Exception:
             return pd.DataFrame()
+
+    def _nci_historico(self) -> pd.DataFrame:
+        """Histórico diario del Nasdaq Crypto Index (NCI) desde nasdaq.com.
+
+        Yahoo solo entrega el último cierre del NCI (sin histórico), así que se
+        descarga de la API pública que alimenta nasdaq.com (``api.nasdaq.com/
+        api/quote/NCI/chart``), sin clave y con caché en disco como el resto de
+        series. El NCI existe desde abril de 2021; se piden 5 años.
+
+        Returns:
+            DataFrame con columna ``Close`` indexado por fecha, o vacío si el
+            índice no pudo obtenerse (fallo seguro → la métrica lo trata N/A).
+        """
+        ruta = DATA_DIR / "NCI.csv"
+
+        if ruta.exists() and not self.refresh:
+            try:
+                df = pd.read_csv(ruta, index_col=0, parse_dates=True)
+                if not df.empty and "Close" in df.columns and not self._cache_desactualizada(df):
+                    return df
+            except Exception:
+                pass  # caché corrupta o vieja → re-descargar
+
+        hoy = pd.Timestamp.today()
+        params = {
+            "assetclass": "index",
+            "fromdate": (hoy - pd.DateOffset(years=5)).strftime("%Y-%m-%d"),
+            "todate": hoy.strftime("%Y-%m-%d"),
+            "period": "daily",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36",
+            "Accept": "application/json",
+            "Origin": "https://www.nasdaq.com",
+            "Referer": "https://www.nasdaq.com/",
+        }
+        try:
+            resp = requests.get(
+                "https://api.nasdaq.com/api/quote/NCI/chart",
+                params=params, headers=headers, timeout=20,
+            )
+            resp.raise_for_status()
+            chart = (resp.json().get("data") or {}).get("chart") or []
+            filas = [(pd.to_datetime(c["z"]["dateTime"]), float(c["y"])) for c in chart]
+        except Exception:
+            return pd.DataFrame()
+
+        if not filas:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(filas, columns=["Date", "Close"]).set_index("Date")
+        df = df.sort_index().dropna()
+        # Fechas duplicadas (intradía o ajustes): última observación de cada día.
+        df = df[~df.index.duplicated(keep="last")]
+
+        if not df.empty:
+            try:
+                ruta.parent.mkdir(parents=True, exist_ok=True)
+                df.to_csv(ruta)
+            except OSError:
+                pass  # sin permiso de escritura: se sigue con datos en memoria
+
+        return df
 
     def fetch(self) -> bool:
         """Descarga el activo y su benchmark, con caché en disco.

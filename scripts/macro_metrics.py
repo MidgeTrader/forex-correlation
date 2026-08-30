@@ -67,8 +67,20 @@ class MarketMetrics:
     correlation_spx: Optional[float] = None
 
 
-def metricas_market(prices: pd.Series, benchmark: Optional[pd.Series]) -> MarketMetrics:
-    """Métricas de mercado del activo (mismo cálculo que MarketEngine)."""
+def metricas_market(
+    prices: pd.Series,
+    benchmark: Optional[pd.Series],
+    dias_anio: int = 252,
+) -> MarketMetrics:
+    """Métricas de mercado del activo (mismo cálculo que MarketEngine).
+
+    Args:
+        prices: Serie de cierres del activo.
+        benchmark: Serie de cierres del benchmark (o None si no hay).
+        dias_anio: Días de negociación al año (252 hábiles; 365 en crypto,
+            que cotiza todos los días). Afecta a la anualización de la
+            volatilidad (√dias_anio) y a las ventanas 1M/1Y.
+    """
     prices = prices.dropna()
     returns = prices.pct_change().dropna()
 
@@ -87,17 +99,17 @@ def metricas_market(prices: pd.Series, benchmark: Optional[pd.Series]) -> Market
             return None
         return current / old - 1
 
-    m.return_1m = trailing_return(21)
-    m.return_1y = trailing_return(252)
+    m.return_1m = trailing_return(dias_anio // 12)
+    m.return_1y = trailing_return(dias_anio)
 
     if len(returns) >= 30:
-        m.volatility_30d = returns.tail(30).std() * np.sqrt(252)
-    if len(returns) >= 252:
-        m.volatility_1y = returns.tail(252).std() * np.sqrt(252)
+        m.volatility_30d = returns.tail(30).std() * np.sqrt(dias_anio)
+    if len(returns) >= dias_anio:
+        m.volatility_1y = returns.tail(dias_anio).std() * np.sqrt(dias_anio)
 
     # Momentum score (normalización, no predicción).
     momentum: list[float] = []
-    for ret in (m.return_1m, trailing_return(126), m.return_1y):
+    for ret in (m.return_1m, trailing_return(dias_anio // 2), m.return_1y):
         if ret is not None:
             momentum.append(float(np.clip(50 + ret * 100, 0, 100)))
 
@@ -111,10 +123,10 @@ def metricas_market(prices: pd.Series, benchmark: Optional[pd.Series]) -> Market
     # Drawdown máximo y Sharpe/Sortino (risk-free 4 %).
     m.max_drawdown = clean_number((prices / prices.cummax() - 1).min())
 
-    if len(returns) >= 252:
-        year_rets = returns.tail(252)
+    if len(returns) >= dias_anio:
+        year_rets = returns.tail(dias_anio)
         annual_return = (1 + year_rets).prod() - 1
-        volatility = year_rets.std() * np.sqrt(252)
+        volatility = year_rets.std() * np.sqrt(dias_anio)
         risk_free = 0.04
 
         if volatility > 0:
@@ -160,8 +172,13 @@ class ReturnsMetrics:
     current_drawdown: Optional[float] = None
 
 
-def metricas_returns(prices: pd.Series) -> ReturnsMetrics:
-    """CAGR, retorno acumulado y drawdown actual (mismo cálculo que ReturnsEngine)."""
+def metricas_returns(prices: pd.Series, dias_anio: int = 252) -> ReturnsMetrics:
+    """CAGR, retorno acumulado y drawdown actual (mismo cálculo que ReturnsEngine).
+
+    Args:
+        prices: Serie de cierres del activo.
+        dias_anio: Días de negociación al año (252 hábiles; 365 en crypto).
+    """
     prices = prices.dropna()
     returns = prices.pct_change().dropna()
 
@@ -176,7 +193,7 @@ def metricas_returns(prices: pd.Series) -> ReturnsMetrics:
         return r
 
     r.cumulative_return = end / start - 1
-    r.cagr = (end / start) ** (252 / len(returns)) - 1
+    r.cagr = (end / start) ** (dias_anio / len(returns)) - 1
 
     peak_value = clean_number(prices.cummax().iloc[-1])
     if peak_value is not None and peak_value > 0:
@@ -278,12 +295,21 @@ class ProbabilityMetrics:
     prob_outperform_spx: Optional[float] = None
 
 
-def metricas_probability(prices: pd.Series, benchmark: Optional[pd.Series]) -> ProbabilityMetrics:
+def metricas_probability(
+    prices: pd.Series,
+    benchmark: Optional[pd.Series],
+    dias_anio: int = 252,
+) -> ProbabilityMetrics:
     """P(retorno 12M < 0) y P(retorno 12M > retorno 12M del benchmark).
 
     Remuestreo con reemplazo de los pares de retornos diarios (activo,
     benchmark) sobre el frame alineado (inner join). Seed fija para
     reproducibilidad (secuencia RNG fija).
+
+    Args:
+        prices: Serie de cierres del activo.
+        benchmark: Serie de cierres del benchmark (o None si no hay).
+        dias_anio: Días del año de simulación (252 hábiles; 365 en crypto).
     """
     returns = prices.dropna().pct_change().dropna()
 
@@ -302,7 +328,7 @@ def metricas_probability(prices: pd.Series, benchmark: Optional[pd.Series]) -> P
 
     rng = np.random.default_rng(42)
     n = len(asset)
-    days = 252
+    days = dias_anio
     n_sims = 10_000
 
     outperf = 0
@@ -333,21 +359,26 @@ def metricas_probability(prices: pd.Series, benchmark: Optional[pd.Series]) -> P
 # Punto de entrada: dict con el mismo shape que espera macro_motores/panel.
 # ---------------------------------------------------------------------------
 
-def metricas(prices: pd.Series, benchmark: Optional[pd.Series]) -> dict:
+def metricas(
+    prices: pd.Series,
+    benchmark: Optional[pd.Series],
+    dias_anio: int = 252,
+) -> dict:
     """Todas las métricas de las tarjetas, en un dict.
 
     Args:
         prices: Serie ``Close`` del activo.
         benchmark: Serie ``Close`` del benchmark (o None si no hay).
+        dias_anio: Días de negociación al año (252 hábiles; 365 en crypto).
 
     Returns:
         Dict con claves ``market``, ``returns``, ``statistics``,
         ``timeseries`` y ``probability``.
     """
     return {
-        "market": metricas_market(prices, benchmark),
-        "probability": metricas_probability(prices, benchmark),
+        "market": metricas_market(prices, benchmark, dias_anio),
+        "probability": metricas_probability(prices, benchmark, dias_anio),
         "statistics": metricas_statistics(prices),
-        "returns": metricas_returns(prices),
+        "returns": metricas_returns(prices, dias_anio),
         "timeseries": metricas_timeseries(prices, benchmark),
     }

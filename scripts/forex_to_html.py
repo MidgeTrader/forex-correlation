@@ -487,7 +487,8 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     if macro_tickers:
         # Renombrar también los tickers macro (GC=F -> GOLD), como en data_close.
         prices_1h_all.columns = [reverse_macro.get(c, c) for c in prices_1h_all.columns]
-    prices_1h = prices_1h_all.tail(200)
+    # 22 sesiones × ~24h para que la media log móvil del mes esté disponible en 1h.
+    prices_1h = prices_1h_all.tail(528)
     
     # 4h (remuestreo de 1h)
     prices_4h = prices_1h_all.resample('4h').last().tail(200)
@@ -1412,10 +1413,10 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
             }});
 
             // Filtro por categoría: muestra solo los activos de la categoría
-            // elegida (Metales/Energía/Índices/Agro/FX). No toca el resto.
-            const catLabels = {{metales:'Metales', energia:'Energía', indices:'Índices', agro:'Agro', fx:'FX'}};
+            // elegida (Metales/Energía/Índices/Agro/Crypto/FX). No toca el resto.
+            const catLabels = {{metales:'Metales', energia:'Energía', indices:'Índices', agro:'Agro', crypto:'Crypto', fx:'FX'}};
             const catFilter = document.getElementById('categoryFilter');
-            ['', 'metales', 'energia', 'indices', 'agro', 'fx'].forEach(function (c) {{
+            ['', 'metales', 'energia', 'indices', 'agro', 'crypto', 'fx'].forEach(function (c) {{
                 var o = document.createElement('option'); o.value = c;
                 o.innerHTML = c === '' ? 'Todas' : (catLabels[c] || c);
                 catFilter.appendChild(o);
@@ -1535,6 +1536,47 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                 updatePriceChart();
             }}
 
+            // Media y desviación estándar logarítmicas en ventana móvil de 'win'
+            // periodos. 'media' es la media geométrica (exp(media ln P)); 'sigma'
+            // la desviación muestral (ddof=1) de ln P. Ignora huecos no numéricos.
+            function mediaLogSigma(data, win) {{
+                const logs = data.map(x => (x != null && isFinite(x)) ? Math.log(x) : NaN);
+                const out = {{ media: [], sigma: [] }};
+                for (let i = 0; i < data.length; i++) {{
+                    const desde = Math.max(0, i - win + 1);
+                    let suma = 0, count = 0;
+                    for (let j = desde; j <= i; j++) {{
+                        if (!isNaN(logs[j])) {{ suma += logs[j]; count++; }}
+                    }}
+                    if (count === 0) {{ out.media.push(null); out.sigma.push(null); continue; }}
+                    const media = suma / count;
+                    let ss = 0;
+                    for (let j = desde; j <= i; j++) {{
+                        if (!isNaN(logs[j])) ss += (logs[j] - media) ** 2;
+                    }}
+                    out.media.push(Math.exp(media));
+                    out.sigma.push(Math.sqrt(ss / (count > 1 ? count - 1 : 1)));
+                }}
+                return out;
+            }}
+
+            // Añade una línea a los datasets de un chart. fillTo '+1' rellena el
+            // área hacia el siguiente dataset (banda); bg es su color de fondo.
+            function pushLine(datasets, label, data, color, width, dash, fillTo, bg) {{
+                datasets.push({{ label, data, borderColor: color, borderWidth: width, borderDash: dash, pointRadius: 0, fill: fillTo || false, backgroundColor: bg || 'rgba(0,0,0,0)' }});
+            }}
+
+            // Ventana del "mes" en barras según el timeframe y la categoría.
+            // FX y macro: 22 sesiones hábiles (1h: 22×24, 4h: 22×6, 1d: 22,
+            // 1w: 22/5). Crypto: 30 días naturales (cotiza los 365 días).
+            function winMesPara(col, tf) {{
+                const crypto = (pairCat[col] === 'crypto');
+                const wins = crypto
+                    ? {{'1h': 720, '4h': 180, '1d': 30, '1w': 4}}
+                    : {{'1h': 528, '4h': 132, '1d': 22, '1w': 4}};
+                return wins[tf] || (crypto ? 30 : 22);
+            }}
+
             function updatePriceChart() {{
                 const p = selector.value;
                 const tfData = pricePack[currentTF];
@@ -1569,6 +1611,16 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                         pointRadius: 0,
                         fill: false
                     }});
+                    // Canal logarítmico del mes: media + bandas ±1σ/±2σ.
+                    // Ventana = 22 sesiones (FX/macro) o 30 días (crypto), según
+                    // el timeframe (ver winMesPara).
+                    const winMes = winMesPara(p, currentTF);
+                    const canal = mediaLogSigma(tfData.data[p], winMes);
+                    pushLine(chartPrice.data.datasets, 'Media Log Mes', canal.media, '#ffd33d', 1, [4, 4]);
+                    pushLine(chartPrice.data.datasets, '2σ sup', canal.media.map((m, i) => m === null ? null : m * Math.exp(2 * canal.sigma[i])), 'rgba(139, 148, 158, 0.7)', 1, [2, 2], '+1', 'rgba(139, 148, 158, 0.02)');
+                    pushLine(chartPrice.data.datasets, '2σ inf', canal.media.map((m, i) => m === null ? null : m * Math.exp(-2 * canal.sigma[i])), 'rgba(139, 148, 158, 0.7)', 1, [2, 2]);
+                    pushLine(chartPrice.data.datasets, '1σ sup', canal.media.map((m, i) => m === null ? null : m * Math.exp(canal.sigma[i])), 'rgba(63, 185, 80, 0.55)', 1, [2, 2], '+1', 'rgba(139, 148, 158, 0.05)');
+                    pushLine(chartPrice.data.datasets, '1σ inf', canal.media.map((m, i) => m === null ? null : m * Math.exp(-canal.sigma[i])), 'rgba(248, 81, 73, 0.55)', 1, [2, 2]);
                 }}
                 
                 chartPrice.update();
@@ -1578,7 +1630,14 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                 const f = pairs[0];
                 const initialPrice = pricePack[currentTF];
                 chartPrice = createChart('chartPrice', 'line', 'Precio', initialPrice.labels, initialPrice.data[f], '#58a6ff', '');
-                
+                const winMesIni = winMesPara(f, currentTF);
+                const canalIni = mediaLogSigma(initialPrice.data[f], winMesIni);
+                pushLine(chartPrice.data.datasets, 'Media Log Mes', canalIni.media, '#ffd33d', 1, [4, 4]);
+                pushLine(chartPrice.data.datasets, '2σ sup', canalIni.media.map((m, i) => m === null ? null : m * Math.exp(2 * canalIni.sigma[i])), 'rgba(139, 148, 158, 0.7)', 1, [2, 2], '+1', 'rgba(139, 148, 158, 0.02)');
+                pushLine(chartPrice.data.datasets, '2σ inf', canalIni.media.map((m, i) => m === null ? null : m * Math.exp(-2 * canalIni.sigma[i])), 'rgba(139, 148, 158, 0.7)', 1, [2, 2]);
+                pushLine(chartPrice.data.datasets, '1σ sup', canalIni.media.map((m, i) => m === null ? null : m * Math.exp(canalIni.sigma[i])), 'rgba(63, 185, 80, 0.55)', 1, [2, 2], '+1', 'rgba(139, 148, 158, 0.05)');
+                pushLine(chartPrice.data.datasets, '1σ inf', canalIni.media.map((m, i) => m === null ? null : m * Math.exp(-canalIni.sigma[i])), 'rgba(248, 81, 73, 0.55)', 1, [2, 2]);
+
                 chartDom = createChart('chartDom', 'bar', 'Vol %', Object.keys(dataDom[f]).map(k=>"D"+k), Object.values(dataDom[f]), '#ff9f43', '%');
                 chartDow = createChart('chartDow', 'bar', 'Vol Sem %', Object.keys(dataDow[f]), Object.values(dataDow[f]), '#58a6ff', '%');
                 chartPips = createChart('chartPips', 'bar', 'Pips Mes', Object.keys(dataPips[f]).map(k=>"D"+k), Object.values(dataPips[f]), '#3fb950', 'Pips');

@@ -203,6 +203,76 @@ def metricas_returns(prices: pd.Series, dias_anio: int = 252) -> ReturnsMetrics:
 
 
 # ---------------------------------------------------------------------------
+# Mean Reversion — estudio de reversión a la media (retorno log de hoy
+# condicionado a la dirección del retorno de ayer).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MeanReversionMetrics:
+    """Media del retorno log semanal y del movimiento en $ por dirección.
+
+    Reversión a la media: si la media tras una semana alcista es negativa (o
+    la tras bajista es positiva), el activo tiende a revertir; si ambas siguen
+    la dirección previa, hay momentum. ``media_*`` es el retorno log medio en
+    fracción; ``movimiento_*`` es el cambio medio en $ entre cierres de viernes
+    (cuánto se movió el precio de media). Cada campo es ``None`` si esa
+    dirección no tiene observaciones o no hay datos suficientes.
+    """
+
+    media_tras_bajada: Optional[float] = None  # retorno log, dirección −1
+    media_tras_subida: Optional[float] = None  # retorno log, dirección +1
+    movimiento_tras_bajada: Optional[float] = None  # $ medio, dirección −1
+    movimiento_tras_subida: Optional[float] = None  # $ medio, dirección +1
+
+
+def metricas_mean_reversion(prices: pd.Series, semanas: int = 156) -> MeanReversionMetrics:
+    """Estudio de reversión a la media (retorno log semanal, últimos 3 años).
+
+    Replica el estudio clásico con cierres de cierre de semana (viernes): se
+    compara el retorno log de la semana actual según la dirección (signo) del
+    retorno de la semana anterior, y se devuelve la media de cada grupo. La
+    frecuencia semanal reduce el ruido diario (medias de mayor magnitud) y la
+    ventana de 3 años equilibra robustez y actualidad: menos ruido que 1 año
+    y menos promediado de regímenes que 5 años. ``np.sign`` sustituye al
+    ``map`` de (1/-1/0): vectorizado y equivalente.
+
+    Args:
+        prices: Serie de cierres diarios del activo.
+        semanas: Ventana a estudiar (156 ≈ 3 años calendario).
+
+    Returns:
+        ``MeanReversionMetrics`` con la media del retorno log y del movimiento
+        en $ por dirección; ``None`` si la dirección no tiene observaciones o
+        la serie es demasiado corta.
+    """
+    prices = prices.dropna()
+    # Cierres de cierre de semana (viernes) de la ventana. La semana (W-FRI)
+    # es una unidad estable tanto para activos de 252 días hábiles como para
+    # crypto (365 días).
+    cierres_sem = prices.resample("W-FRI").last().dropna().tail(semanas)
+    if len(cierres_sem) < 3:
+        return MeanReversionMetrics()
+
+    retorno_log = np.log(cierres_sem / cierres_sem.shift(1))
+    cambio_usd = cierres_sem.diff()
+    direccion = np.sign(retorno_log.shift(1))
+
+    estudio = pd.DataFrame({"dir": direccion, "ret": retorno_log, "usd": cambio_usd}).dropna()
+    if estudio.empty:
+        return MeanReversionMetrics()
+
+    medias_ret = estudio.groupby("dir")["ret"].mean()
+    medias_usd = estudio.groupby("dir")["usd"].mean()
+
+    return MeanReversionMetrics(
+        media_tras_bajada=clean_number(medias_ret.get(-1.0)),
+        media_tras_subida=clean_number(medias_ret.get(1.0)),
+        movimiento_tras_bajada=clean_number(medias_usd.get(-1.0)),
+        movimiento_tras_subida=clean_number(medias_usd.get(1.0)),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Statistics — momentos y riesgo de cola de los retornos diarios.
 # ---------------------------------------------------------------------------
 
@@ -381,4 +451,5 @@ def metricas(
         "statistics": metricas_statistics(prices),
         "returns": metricas_returns(prices, dias_anio),
         "timeseries": metricas_timeseries(prices, benchmark),
+        "mean_reversion": metricas_mean_reversion(prices),
     }

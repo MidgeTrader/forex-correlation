@@ -56,14 +56,21 @@ def fmt_precio(valor: Optional[float]) -> str:
     return "N/A" if _es_na(valor) else f"{valor:,.2f}"
 
 
-def fmt_pct_frac(valor: Optional[float], signo: bool = False) -> str:
-    """Fracción → porcentaje (×100). ``signo`` antepone +/−."""
+def fmt_pct_frac(valor: Optional[float], signo: bool = False, decimales: int = 1) -> str:
+    """Fracción → porcentaje (×100). ``signo`` antepone +/−.
+
+    Args:
+        valor: Fracción a formatear (0.0025 → 0.2 %).
+        signo: Anteponer +/−.
+        decimales: Nº de decimales (1 por defecto; las medias de reversión
+            semanales usan 2 para no redondearse a 0.0 %).
+    """
     if _es_na(valor):
         return "N/A"
     pct = valor * 100
     if signo:
-        return f"{pct:+.1f}%"
-    return f"{pct:.1f}%"
+        return f"{pct:+.{decimales}f}%"
+    return f"{pct:.{decimales}f}%"
 
 
 def fmt_pct_100(valor: Optional[float], signo: bool = False) -> str:
@@ -73,6 +80,25 @@ def fmt_pct_100(valor: Optional[float], signo: bool = False) -> str:
     if signo:
         return f"{valor:+.1f}%"
     return f"{valor:.1f}%"
+
+
+def fmt_movimiento_usd(valor: Optional[float]) -> str:
+    """Movimiento en USD con precisión adaptada a la magnitud.
+
+    Precios altos (BTC, índices) → unidades; precios bajos (pares FX) → hasta
+    4 decimales para no redondearse a 0.00.
+    """
+    if _es_na(valor):
+        return "N/A"
+    signo = "+" if valor >= 0 else "-"
+    abs_v = abs(valor)
+    if abs_v >= 100:
+        return f"{signo}${abs_v:,.0f}"
+    if abs_v >= 1:
+        return f"{signo}${abs_v:,.2f}"
+    if abs_v >= 0.01:
+        return f"{signo}${abs_v:,.3f}"
+    return f"{signo}${abs_v:,.4f}"
 
 
 def fmt_num(valor: Optional[float], decimales: int = 2) -> str:
@@ -204,6 +230,7 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
     probability = results["probability"]
     timeseries = results["timeseries"]
     statistics = results["statistics"]
+    mean_reversion = results["mean_reversion"]
 
     closes = data.price_data["Close"].dropna()
 
@@ -293,6 +320,37 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
     else:
         filas_yield = []
 
+    # Estudio de reversión a la media: media del retorno log semanal de la
+    # semana actual según la dirección de la semana anterior (últimos 3 años
+    # ≈ 156 semanas). La flecha indica la CONDICIÓN: "M Reversión S (T↓)" = media
+    # tras una semana bajista, "M Reversión S (T↑)" = media tras una alcista.
+    # Se muestra solo la dirección con observaciones; media negativa tras
+    # subida (o positiva tras bajada) indica reversión.
+    filas_reversion = []
+    if mean_reversion.media_tras_bajada is not None:
+        # Movimiento medio en $ del propio estudio (media del cambio semanal
+        # entre cierres de viernes), no del precio de hoy. Va delante en blanco;
+        # el % coloreado después según su signo.
+        usd_tras_bajada = fmt_movimiento_usd(mean_reversion.movimiento_tras_bajada)
+        filas_reversion.append(
+            _fila(
+                "M Reversión S (T↓)",
+                (f"{usd_tras_bajada} · " if mean_reversion.movimiento_tras_bajada is not None else "")
+                + f'<span{_color_retorno(mean_reversion.media_tras_bajada)}>'
+                f'{fmt_pct_frac(mean_reversion.media_tras_bajada, signo=True, decimales=2)}</span>',
+            )
+        )
+    if mean_reversion.media_tras_subida is not None:
+        usd_tras_subida = fmt_movimiento_usd(mean_reversion.movimiento_tras_subida)
+        filas_reversion.append(
+            _fila(
+                "M Reversión S (T↑)",
+                (f"{usd_tras_subida} · " if mean_reversion.movimiento_tras_subida is not None else "")
+                + f'<span{_color_retorno(mean_reversion.media_tras_subida)}>'
+                f'{fmt_pct_frac(mean_reversion.media_tras_subida, signo=True, decimales=2)}</span>',
+            )
+        )
+
     filas = [
         _fila_retorno("Retorno YTD", retorno_ytd),
         _fila_retorno("Retorno 1M", market.return_1m),
@@ -312,6 +370,7 @@ def panel_activo(key: str, data, results: Optional[dict]) -> str:
         _fila(f"Alpha vs {benchmark}", fmt_pct_frac(timeseries.ols_alpha_annual, signo=True)),
         _fila_prob("P(retorno 12M < 0)", probability.prob_negative, alto_es_riesgo=True),
         _fila_prob(f"P(ganar a {benchmark} 12M)", probability.prob_outperform_spx, alto_es_riesgo=False),
+        *filas_reversion,
     ]
 
     tabla = "\n".join(filas)

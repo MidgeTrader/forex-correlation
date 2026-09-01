@@ -28,6 +28,8 @@ from forex_to_html import analyze_forex_to_html  # noqa: E402
 from macro_catalogo import CATEGORIAS, CATEGORIAS_ORDER, MACRO_ASSETS, activos_de_categoria  # noqa: E402
 from macro_motores import analizar_activo  # noqa: E402
 from macro_panel_html import panel_activo  # noqa: E402
+from bonos_motores import analizar_curva  # noqa: E402
+from bonos_panel_html import panel_curva  # noqa: E402
 
 # CSS adicional del dashboard (tema FX, misma paleta).
 _CSS_MACRO = """
@@ -93,6 +95,30 @@ _NAV_ORDER = CATEGORIAS_ORDER + ["graficas"]
 
 # Etiquetas de la barra: las categorías de activos + la sección de gráficas.
 _ETIQUETAS_NAV = {**CATEGORIAS, "graficas": "Gráficas"}
+
+
+def _seccion_bonos(refresh: bool) -> str:
+    """Sección de la Curva del Tesoro de EE.UU. (una card con los 5 tramos).
+
+    Los bonos no son activos con retorno/vol: se muestran como curva (nivel y
+    cambios en pb) desde FRED/DGS, no con ``macro_motores``.
+
+    Args:
+        refresh: True fuerza la re-descarga (ignora la caché en disco).
+
+    Returns:
+        HTML de la sección: cabecera de categoría + grid con la card de curva.
+    """
+    print("  Curva del Tesoro (FRED DGS)...", end="", flush=True)
+    df = analizar_curva(refresh=refresh)
+    if df is not None:
+        print("ok")
+    else:
+        print("sin datos")
+    return (
+        '<h2 class="cat-header">Bonos</h2>\n'
+        '<div class="macro-grid">\n' + panel_curva(df) + "\n</div>"
+    )
 
 
 def _seccion_macro(categoria: str, refresh: bool) -> str:
@@ -209,8 +235,9 @@ def generar_dashboard(refresh: bool = False) -> str:
         print(f"[{CATEGORIAS[cat]}]")
         # La pestaña FX (tarjetas de los 7 mayores) es la visible por defecto.
         cls = " active" if cat == "fx" else ""
+        seccion = _seccion_bonos(refresh) if cat == "bonos" else _seccion_macro(cat, refresh)
         secciones_macro.append(
-            f'<section id="cat-{cat}" class="cat-section{cls}">\n{_seccion_macro(cat, refresh)}\n</section>'
+            f'<section id="cat-{cat}" class="cat-section{cls}">\n{seccion}\n</section>'
         )
 
     secciones = "\n".join(secciones_macro)

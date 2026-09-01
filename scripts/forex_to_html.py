@@ -22,6 +22,8 @@ except ImportError:
     pass
 from scipy.stats import norm
 
+from regimen import detectar_regimen
+
 # --- UTILIDADES DE ROBUSTEZ ---
 
 def _f(value) -> float | None:
@@ -300,7 +302,7 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     
     print(f"Descargando datos para {len(symbols)} pares...")
     end_date = datetime.now()
-    start_date = end_date - pd.DateOffset(years=2)
+    start_date = end_date - pd.DateOffset(years=5)
     
     try:
         raw_data = _descarga_con_reintentos(lambda: yf.download(symbols, start=start_date, end=end_date, progress=False))
@@ -312,6 +314,7 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
         m_low = lows.resample('ME').min()
         m_close = data_close.resample('ME').last()
         data_monthly_range = ((m_high - m_low) / m_close) * 100
+        volume = raw_data['Volume'].ffill() if 'Volume' in raw_data.columns else None
     except Exception as e:
         print(f"Error: {e}")
         return
@@ -338,7 +341,10 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
     data_monthly_range = data_monthly_range.loc[:, ~data_monthly_range.columns.duplicated()]
     highs = highs.loc[:, ~highs.columns.duplicated()]
     lows = lows.loc[:, ~lows.columns.duplicated()]
-    
+    if volume is not None:
+        volume.columns = new_cols
+        volume = volume.loc[:, ~volume.columns.duplicated()]
+
     # Conjunto de columnas que son pares FX reales (para los pips). Los activos
     # macro usan factor 1.0: su "rango" se expresa en unidades de precio (USD,
     # puntos), no en pips — un factor FX haría inútiles sus gráficas de rango.
@@ -352,6 +358,22 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
 
     returns = data_close.pct_change()
     corr_matrix = returns.corr()
+
+    # Régimen de mercado por clustering (GMM), por símbolo, con las series
+    # diarias ya descargadas. Los pares FX (volumen 0 de Yahoo) usan las
+    # features de retorno/vol/drawdown/range; el resto añade volumen. Si un
+    # activo no llega al mínimo de historia, se omite (card "Sin datos").
+    regime_data = {}
+    for col in data_close.columns:
+        rd = detectar_regimen(
+            data_close[col],
+            high=highs[col],
+            low=lows[col],
+            volume=volume[col] if volume is not None else None,
+        )
+        if rd:
+            regime_data[col] = rd
+    regime_data_json = json.dumps(regime_data)
 
     # 1. Heatmap Global
     # Con ~50 activos las celdas a (10,8) quedaban diminutas (~14 px). Alto
@@ -1028,10 +1050,20 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                     </div>
                     <div class="price-chart-wrapper"><canvas id="chartPrice"></canvas></div>
                 </div>
-                <div class="card" onclick="expandImg(this.querySelector('img'), 'Ranking Correlaciones')">
-                    <span class="zoom-icon">🔍</span>
-                    <h2>Ranking Correlaciones</h2>
-                    <img src="data:image/png;base64,{img_ranking}">
+                <div class="card" style="cursor: default;">
+                    <h2>Régimen de Mercado</h2>
+                    <div id="regimeStatus" style="font-size:0.82em; font-weight:bold; color:#58a6ff; margin:0 0 4px 0; line-height:1.3;">—</div>
+                    <table style="width:100%; border-collapse: collapse; margin-top:2px;">
+                        <tr style="border-bottom: 1px solid #30363d;"><td style="padding:3px 0;">Régimen actual</td><td id="regRegime" style="text-align:right; color:#c9d1d9; font-weight:bold;">—</td></tr>
+                        <tr style="border-bottom: 1px solid #30363d;"><td style="padding:3px 0;">Fiabilidad</td><td id="regConf" style="text-align:right; color:#c9d1d9; font-weight:bold;">—</td></tr>
+                        <tr style="border-bottom: 1px solid #30363d;"><td style="padding:3px 0;">Duración actual</td><td id="regDur" style="text-align:right; color:#c9d1d9;">—</td></tr>
+                        <tr style="border-bottom: 1px solid #30363d;"><td style="padding:3px 0; color:#8b949e;">Duración mediana</td><td id="regMeanDur" style="text-align:right; color:#8b949e;">—</td></tr>
+                        <tr style="border-bottom: 1px solid #30363d;"><td style="padding:3px 0;">Régimen anterior</td><td id="regPrev" style="text-align:right; color:#8b949e;">—</td></tr>
+                        <tr style="border-bottom: 1px solid #30363d;"><td style="padding:3px 0;">Retorno 20D</td><td id="regRet20" style="text-align:right; color:#c9d1d9; font-weight:bold;">—</td></tr>
+                        <tr style="border-bottom: 1px solid #30363d;"><td style="padding:3px 0;">Volatilidad 20D</td><td id="regVol20" style="text-align:right; color:#c9d1d9;">—</td></tr>
+                        <tr style="border-bottom: 1px solid #30363d;"><td style="padding:3px 0;">Drawdown 60D</td><td id="regDD60" style="text-align:right; color:#c9d1d9;">—</td></tr>
+                        <tr><td style="padding:3px 0; color:#58a6ff;">Transición (próx. semana)</td><td id="regTrans" style="text-align:right; color:#8b949e; font-size:0.92em; line-height:1.4;">—</td></tr>
+                    </table>
                 </div>
                 <div class="card" onclick="expandImg(this.querySelector('img'), 'Matriz Global')">
                     <span class="zoom-icon">🔍</span>
@@ -1131,10 +1163,10 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
             </div>
 
             <div class="row-4-cols">
-                <div class="card" onclick="expandChart('chartSunburst', 'MAPA DE RENDIMIENTO')">
+                <div class="card" onclick="expandImg(this.querySelector('img'), 'Ranking Correlaciones')">
                     <span class="zoom-icon">🔍</span>
-                    <h2>MAPA DE RENDIMIENTO</h2>
-                    <div class="chart-wrapper"><div id="chartSunburst" style="width:100%; height:100%;"></div></div>
+                    <h2>Ranking Correlaciones</h2>
+                    <img src="data:image/png;base64,{img_ranking}">
                 </div>
                 <div class="card" onclick="expandChart('chartSankey', 'FLUJO DE IMPACTO')">
                     <span class="zoom-icon">🔍</span>
@@ -1215,11 +1247,12 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
             const mertonData = {merton_json};
             const displayNames = {display_names_json};
             const pairCat = {pair_cat_json};
+            const regimeData = {regime_data_json};
             
             const pairs = Object.keys(dataDom).sort();
             const selector = document.getElementById('pairSelector');
             let currentTF = '1d';
-            let chartDom, chartDow, chartPips, chartPipsDow, chartPrice, chartMarkov, chartScatter, chartKernelHist, chartSeasonality, 
+            let chartDom, chartDow, chartPips, chartPipsDow, chartPrice, chartMarkov, chartScatter, chartKernelHist, chartSeasonality,
                 chartGBM, chartGARCH, chartMerton, modalChart;
             
             // Plugin para dibujar etiquetas en las líneas horizontales de rango
@@ -1270,7 +1303,6 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                 'chartGARCH': () => 'plotly',
                 'chartMerton': () => 'plotly',
                 'chartMarkov': () => chartMarkov,
-                'chartSunburst': () => 'plotly',
                 'chartSankey': () => 'plotly',
                 'chartBubble': () => 'plotly',
                 'chartSurface': () => 'plotly'
@@ -1291,7 +1323,7 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                 modalCanvas.style.display = 'none';
                 modalPlotly.style.display = 'none';
 
-                if (id === 'chartScatter' || id === 'chartSunburst' || id === 'chartSankey' || id === 'chartBubble' || id === 'chartSurface' || 
+                if (id === 'chartScatter' || id === 'chartSankey' || id === 'chartBubble' || id === 'chartSurface' ||
                     id === 'chartGBM' || id === 'chartGARCH' || id === 'chartMerton') {{
                     modalPlotly.style.display = 'block';
                     
@@ -1328,11 +1360,6 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                         Plotly.newPlot('modalPlotly', [{{
                             x: hist.x, y: hist.y, z: hist.z, mode: 'markers', marker: {{ size: 6, color: hist.colors }}, text: hist.text, type: 'scatter3d'
                         }}], {{ scene: {{ bgcolor: '#161b22' }}, paper_bgcolor: '#161b22', margin: {{ l: 0, r: 0, b: 0, t: 0 }} }});
-                    }} else if (id === 'chartSunburst') {{
-                        Plotly.newPlot('modalPlotly', [{{
-                            type: "sunburst", ids: marketHierarchy.ids, labels: marketHierarchy.labels, parents: marketHierarchy.parents, values: marketHierarchy.values,
-                            marker: {{ colors: marketHierarchy.colors, colorscale: "RdYlGn", cmid: 0 }}, text: marketHierarchy.hovers, hoverinfo: "text", branchvalues: "total"
-                        }}], {{ margin: {{l: 0, r: 0, b: 0, t: 0}}, paper_bgcolor: '#161b22', font: {{color: '#c9d1d9'}} }});
                     }} else if (id === 'chartSankey') {{
                         Plotly.newPlot('modalPlotly', [{{
                             type: "sankey", node: {{ pad: 15, thickness: 20, label: marketSankey.labels, color: "#58a6ff" }},
@@ -1527,6 +1554,56 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                 }});
             }}
 
+            // Card de Régimen: panel de estadísticas del régimen GMM actual.
+            // Datos por símbolo en `regimeData`; cambia con el selector igual
+            // que el resto de gráficas de la sección.
+            function setRegimeCell(id, txt, color) {{
+                const el = document.getElementById(id);
+                if (el) {{
+                    el.textContent = txt;
+                    if (color) el.style.color = color;
+                }}
+            }}
+
+            function renderRegime() {{
+                const d = regimeData[selector.value];
+                const status = document.getElementById('regimeStatus');
+                if (!d) {{
+                    if (status) {{
+                        status.textContent = 'Sin datos suficientes para régimen';
+                        status.style.color = '#f85149';
+                    }}
+                    ['regRegime', 'regConf', 'regDur', 'regMeanDur', 'regPrev', 'regRet20', 'regVol20',
+                     'regDD60', 'regTrans'].forEach(id => setRegimeCell(id, '—'));
+                    return;
+                }}
+                const c = d.current;
+                if (status) {{
+                    status.textContent = 'RÉGIMEN ACTUAL: ' + c.regime.toUpperCase();
+                    status.style.color = c.color;
+                }}
+                setRegimeCell('regRegime', c.regime);
+                // Fiabilidad = acuerdo fuera de muestra (verde ≥70%, naranja
+                // 40-69%, rojo <40%): un número honesto, no el 100% in-sample.
+                const conf = c.fiabilidad;
+                setRegimeCell('regConf',
+                    conf != null ? (conf * 100).toFixed(0) + '%' : '—',
+                    conf != null ? (conf >= 0.70 ? '#3fb950' : conf >= 0.40 ? '#ff9f43' : '#f85149') : null);
+                setRegimeCell('regDur', c.duration + (c.duration === 1 ? ' día' : ' días'));
+                setRegimeCell('regMeanDur',
+                    c.medianDuration != null ? Math.round(c.medianDuration) + ' días' : '—');
+                setRegimeCell('regPrev', c.prevRegime);
+                const r20 = c.ret20;
+                setRegimeCell('regRet20', (r20 > 0 ? '+' : '') + r20.toFixed(1) + '%', r20 >= 0 ? '#3fb950' : '#f85149');
+                setRegimeCell('regVol20', c.vol20.toFixed(1) + '%');
+                const dd = c.dd60;
+                setRegimeCell('regDD60', (dd > 0 ? '+' : '') + dd.toFixed(1) + '%', dd >= 0 ? '#3fb950' : '#f85149');
+                const trans = c.transitions.slice(0, 3).map(t =>
+                    t.regime.split(' / ')[0] + ' ' + (t.prob * 100).toFixed(0) + '%'
+                ).join(' · ');
+                setRegimeCell('regTrans', trans || '—');
+            }}
+
             function setTF(tf) {{
                 currentTF = tf;
                 document.querySelectorAll('.tf-btn').forEach(b => {{
@@ -1642,8 +1719,8 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                 chartDow = createChart('chartDow', 'bar', 'Vol Sem %', Object.keys(dataDow[f]), Object.values(dataDow[f]), '#58a6ff', '%');
                 chartPips = createChart('chartPips', 'bar', 'Pips Mes', Object.keys(dataPips[f]).map(k=>"D"+k), Object.values(dataPips[f]), '#3fb950', 'Pips');
                 chartPipsDow = createChart('chartPipsDow', 'bar', 'Pips Sem', Object.keys(dataPipsDow[f]), Object.values(dataPipsDow[f]), '#a371f7', 'Pips');
-                
-                
+                renderRegime();
+
                 // Gráfico 3D con Plotly
                 const hist = scatterData[f];
                 const trace = {{
@@ -1673,29 +1750,6 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                     font: {{ color: '#8b949e', size: 10 }}
                 }};
                 Plotly.newPlot('chartScatter', [trace], layout);
-
-                // Sunburst Global
-                const traceSB = {{
-                    type: "sunburst",
-                    ids: marketHierarchy.ids,
-                    labels: marketHierarchy.labels,
-                    parents: marketHierarchy.parents,
-                    values: marketHierarchy.values,
-                    marker: {{
-                        colors: marketHierarchy.colors,
-                        colorscale: "RdYlGn",
-                        cmid: 0
-                    }},
-                    text: marketHierarchy.hovers,
-                    hoverinfo: "text",
-                    branchvalues: "total"
-                }};
-                const layoutSB = {{
-                    margin: {{l: 0, r: 0, b: 0, t: 0}},
-                    paper_bgcolor: '#161b22',
-                    font: {{color: '#8b949e', size: 10}}
-                }};
-                Plotly.newPlot('chartSunburst', [traceSB], layoutSB);
 
                 // Sankey Global
                 const traceSK = {{
@@ -1968,6 +2022,8 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                     }});
                 }}
 
+                renderRegime();
+
                 const modal = document.getElementById('chartModal');
                 if (modal.style.display === 'flex') {{
                     const currentTitle = document.getElementById('modalTitle').innerText;
@@ -1986,7 +2042,7 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
                 for (var i = 0; i < chs.length; i++) {{
                     if (chs[i] && chs[i].resize) {{ try {{ chs[i].resize(); }} catch(e){{}} }}
                 }}
-                var ids = ['chartScatter','chartSunburst','chartSankey','chartBubble','chartSurface','chartGBM','chartGARCH','chartMerton'];
+                var ids = ['chartScatter','chartSankey','chartBubble','chartSurface','chartGBM','chartGARCH','chartMerton'];
                 for (var j = 0; j < ids.length; j++) {{
                     var el = document.getElementById(ids[j]);
                     if (el && el.data) {{ try {{ Plotly.Plots.resize(ids[j]); }} catch(e){{}} }}

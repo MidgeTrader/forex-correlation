@@ -22,10 +22,11 @@ CATEGORIAS: Final[dict[str, str]] = {
     "agro": "Agro",
     "crypto": "Crypto",
     "fx": "FX",
+    "bonos": "Bonos",
 }
 
 # Orden de las categorías en la barra (el generador añade "graficas" al final).
-CATEGORIAS_ORDER: Final[list[str]] = ["metales", "energia", "indices", "agro", "crypto", "fx"]
+CATEGORIAS_ORDER: Final[list[str]] = ["metales", "energia", "indices", "agro", "crypto", "fx", "bonos"]
 
 # Benchmark por defecto según la categoría: índice → SPY, agro → DBA
 # (índice de futuros agrícolas), metales → DBP (preciosos), energía → DBE,
@@ -130,6 +131,19 @@ MACRO_ASSETS: Final[dict[str, dict[str, str]]] = {
     "BNB": {"categoria": "crypto", "label": "BNB", "ticker_yf": "BNB-USD"},
     "XRP": {"categoria": "crypto", "label": "XRP", "ticker_yf": "XRP-USD"},
     "SOL": {"categoria": "crypto", "label": "Solana", "ticker_yf": "SOL-USD"},
+}
+
+# Curva del Tesoro de EE.UU. (categoría bonos): los 5 tramos estándar con su
+# serie de rendimiento "constant maturity" en FRED. Estas series DGS* SON los
+# "Daily Treasury Par Yield Curve Rates" que publica el propio Tesoro (FRED los
+# sirve sin necesidad de saltar su anti-bot). No son activos con retorno/vol:
+# se muestran como curva (nivel + cambios en pb) en una sola card.
+BONOS_TRAMOS: Final[dict[str, dict[str, object]]] = {
+    "TB3M": {"label": "3 meses", "series": "DGS3MO", "venc_anos": 0.25},
+    "TB2Y": {"label": "2 años", "series": "DGS2", "venc_anos": 2},
+    "TB5Y": {"label": "5 años", "series": "DGS5", "venc_anos": 5},
+    "TB10Y": {"label": "10 años", "series": "DGS10", "venc_anos": 10},
+    "TB30Y": {"label": "30 años", "series": "DGS30", "venc_anos": 30},
 }
 
 

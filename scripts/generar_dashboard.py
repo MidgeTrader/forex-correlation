@@ -30,6 +30,8 @@ from macro_motores import analizar_activo  # noqa: E402
 from macro_panel_html import panel_activo  # noqa: E402
 from bonos_motores import analizar_curva  # noqa: E402
 from bonos_panel_html import panel_curva  # noqa: E402
+from xsp_motores import analizar_xsp  # noqa: E402
+from xsp_panel_html import panel_xsp  # noqa: E402
 
 # CSS adicional del dashboard (tema FX, misma paleta).
 _CSS_MACRO = """
@@ -50,6 +52,12 @@ _CSS_MACRO = """
                   gap:12px; align-items:stretch; }
     .macro-card { background:#161b22; border:1px solid #30363d; border-radius:8px;
                   padding:14px; display:flex; flex-direction:column; }
+    /* Card que ocupa dos columnas del grid (la del día del mes, con 31 filas).
+       Por debajo del ancho de dos columnas mínimas (2x340 + 12 de gap + 20 de
+       padding del body) el span se saldría del contenedor, así que vuelve a una
+       sola columna: mejor estrecha que desbordada. */
+    .macro-card--ancha { grid-column: span 2; }
+    @media (max-width: 740px) { .macro-card--ancha { grid-column: span 1; } }
     .macro-card h3 { color:#a5d6ff; margin:0 0 2px 0; font-size:1em; }
     .macro-card .ticker { color:#8b949e; font-weight:normal; font-size:0.8em; }
     .macro-card .macro-precio { font-size:1.15em; font-weight:600; color:#c9d1d9; }
@@ -89,12 +97,13 @@ _JS_CATEGORIAS = """
     }
 """
 
-# Orden de las categorías en la barra: macro + FX (tarjetas) + Gráficas
+# Orden de las categorías en la barra: XSP primero (es la pestaña de trabajo
+# diario: los iron condors), luego macro + FX (tarjetas) y al final Gráficas
 # (dashboard interactivo FX, renombrado de la antigua pestaña "FX").
-_NAV_ORDER = CATEGORIAS_ORDER + ["graficas"]
+_NAV_ORDER = ["xsp"] + CATEGORIAS_ORDER + ["graficas"]
 
-# Etiquetas de la barra: las categorías de activos + la sección de gráficas.
-_ETIQUETAS_NAV = {**CATEGORIAS, "graficas": "Gráficas"}
+# Etiquetas de la barra: las categorías de activos + las secciones propias.
+_ETIQUETAS_NAV = {**CATEGORIAS, "graficas": "Gráficas", "xsp": "XSP"}
 
 
 def _seccion_bonos(refresh: bool) -> str:
@@ -118,6 +127,28 @@ def _seccion_bonos(refresh: bool) -> str:
     return (
         '<h2 class="cat-header">Bonos</h2>\n'
         '<div class="macro-grid">\n' + panel_curva(df) + "\n</div>"
+    )
+
+
+def _seccion_xsp(refresh: bool) -> str:
+    """Sección de XSP: volatilidad, bandas del condor y rangos por periodo.
+
+    XSP no es un activo macro más (no sale del catálogo): se muestra con su
+    propio motor y sus propias cards, porque lo que se mira aquí son las bandas
+    de un iron condor, no el retorno del activo.
+
+    Args:
+        refresh: True fuerza la re-descarga de los precios (ignora la caché).
+
+    Returns:
+        HTML de la sección: cabecera de categoría + grid con las 4 cards.
+    """
+    print("  XSP (volatilidad + condor)...", end="", flush=True)
+    analisis = analizar_xsp(refresh=refresh)
+    print("ok" if analisis.precio is not None else "sin datos")
+    return (
+        '<h2 class="cat-header">XSP · Iron Condors</h2>\n'
+        '<div class="macro-grid">\n' + panel_xsp(analisis) + "\n</div>"
     )
 
 
@@ -240,7 +271,15 @@ def generar_dashboard(refresh: bool = False) -> str:
             f'<section id="cat-{cat}" class="cat-section{cls}">\n{seccion}\n</section>'
         )
 
-    secciones = "\n".join(secciones_macro)
+    # Sección XSP (iron condors): va la primera en el HTML para que el botón
+    # del nav (que ya la precede) y la sección sigan el mismo orden.
+    seccion_xsp = (
+        '<section id="cat-xsp" class="cat-section">\n'
+        + _seccion_xsp(refresh)
+        + "\n</section>"
+    )
+
+    secciones = seccion_xsp + "\n" + "\n".join(secciones_macro)
     # Sección "Gráficas": el dashboard interactivo FX (renombrado de la antigua
     # pestaña FX). Queda detrás de la pestaña FX de tarjetas.
     seccion_graficas = '<section id="cat-graficas" class="cat-section">\n' + body_fx + "\n</section>"

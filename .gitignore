@@ -9,6 +9,7 @@ data/
 
 # Artefactos generados
 forex_dashboard.html
+forex_solo_fx.html
 
 # Estrategias de scalping y resultados de backtest (no se publican)
 estrategias/

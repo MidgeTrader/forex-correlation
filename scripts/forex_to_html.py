@@ -2058,8 +2058,15 @@ def analyze_forex_to_html(macro_tickers=None, macro_labels=None, macro_categoria
 
 
 if __name__ == "__main__":
+    # Este módulo genera SOLO la sección FX. El dashboard completo —condores,
+    # macro, bonos y esta misma sección— lo ensambla ``generar_dashboard.py``, que
+    # importa ``analyze_forex_to_html`` de aquí. Por eso la salida no puede ser
+    # ``forex_dashboard.html``: escribirla aquí lo dejaba reducido a la sección FX
+    # sin que nada avisara, y el usuario se enteraba al abrir el dashboard y ver que
+    # le faltaban pestañas. El nombre del fichero dice lo que hay dentro.
     html = analyze_forex_to_html()
-    html_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "forex_dashboard.html")
+    html_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "forex_solo_fx.html")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"\nDashboard interactivo generado: {html_path}")
+    print(f"\nSección FX generada: {html_path}")
+    print("Para el dashboard completo: python scripts/generar_dashboard.py")

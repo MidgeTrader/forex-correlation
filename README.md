@@ -89,11 +89,24 @@ python3 -m venv .venv
 
 El resultado es `forex_dashboard.html`, un archivo único que puedes abrir en
 cualquier navegador o copiar a otra máquina. En Linux, `scripts/launch.sh`
-genera (si falta) y abre el dashboard.
+genera el dashboard **si el HTML no es de hoy** y lo abre: las cards de los
+condores enseñan la sesión en curso, así que abrir el fichero que quedó de la
+última vez da datos viejos. La generación tarda alrededor de minuto y medio —lo
+caro es el cálculo macro, no las descargas— y avisa por notificación de
+escritorio mientras trabaja.
 
-Las cards se auto-refrescan: si la caché en `data/` queda por detrás del
-último día hábil, se re-descarga sola al regenerar — no hace falta `--refresh`
-salvo para forzar una descarga completa.
+Las cards se auto-refrescan: los precios de los condores se re-descargarán si la
+caché en `data/` no llega a la sesión que toca (la de hoy en día hábil, la del
+viernes en fin de semana), y las demás secciones si la caché queda por detrás
+del último día hábil. No hace falta `--refresh` salvo para forzar una descarga
+completa.
+
+Para generar **solo la sección FX** —sin condores, macro ni bonos—, que es lo que
+`generar_dashboard.py` usa por dentro para la pestaña Gráficas:
+
+```bash
+.venv/bin/python scripts/forex_to_html.py   # → forex_solo_fx.html
+```
 
 ## API de FRED (opcional)
 
@@ -112,4 +125,7 @@ carry usa los últimos tipos de reserva verificados. El `.env` nunca se sube.
 
 ## Vista previa
 
-![Dashboard de correlaciones FX + macro](docs/screenshots/dashboard.png)
+![Pestaña XSP · Iron Condors del Quant Dashboard](docs/screenshots/dashboard.png)
+
+La captura enseña la pestaña **XSP · Iron Condors**, que es la de trabajo diario.
+La barra superior navega al resto de categorías.

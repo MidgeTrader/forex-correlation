@@ -1,9 +1,15 @@
-"""Cards HTML de la pestaña XSP.
+"""Cards HTML de una pestaña de iron condors (una por subyacente).
 
 Una card por asunto: volatilidad, **una por vencimiento** (0 DTE, 1 DTE y
 semanal van separados, que son los ciclos que se operan), día, semana y mes
 para los rangos históricos en %, y una card ancha aparte con los 31 días del
 mes, que no cabe en el ancho de una.
+
+El subyacente NO se pasa como argumento: viaja dentro del análisis
+(``a.subyacente``), de modo que el rótulo y las cifras son inseparables y no se
+puede pintar la pestaña de uno con los números del otro. Todo lo que nombra al
+instrumento (``XSP``, ``VIX``, los ``id`` de las cards) sale de ahí; las frases
+que no lo nombran («Vol realizada», «Rango medio», «Banda 1σ») son literales.
 
 El tema visual es el del dashboard (fondo ``#161b22``, acentos
 ``#58a6ff``/``#3fb950``/``#f85149``) y reutiliza los formateadores y las filas
@@ -11,8 +17,8 @@ de ``macro_panel_html`` para no duplicar formato.
 
 Unidades — cada bloque llega en una escala distinta y hay que respetarla:
   - ``hv``, ``iv`` y ``sigma_pct``: fracciones (×100 para %).
-  - ``vix``: ya es un % anualizado en puntos (16.84 = 16.84 %), no se toca.
-  - ``vix_percentil``: 0-100.
+  - ``vol``: ya es un % anualizado en puntos (16.84 = 16.84 %), no se toca.
+  - ``vol_percentil``: 0-100.
   - ``media_pct``/``mediana_pct``/``ultimo_pct`` de los periodos: YA son %.
   - ``prima_vol``: ratio sin unidad.
 Cualquier dato ausente se pinta como ``N/A`` honesto — nunca se inventa, y el
@@ -81,17 +87,18 @@ def _fila_vencimiento(etiqueta: str, texto: str, color: str = "") -> str:
 def _filas_vencimiento(v) -> list[str]:
     """Filas de un vencimiento: IV, movimiento esperado, bandas σ con su OTM, ATR y banda del ATR.
 
-    Las alas NO se pintan: en XSP el strike va de $1 en $1, así que el strike
-    real más próximo a una banda es esa misma banda redondeada y salían dos
-    filas con los mismos números. Se siguen calculando, eso sí, porque el OTM
-    se mide sobre ellas: son los strikes que de verdad se teclean en la orden.
+    Las alas NO se pintan: tanto en XSP como en QQQ el strike va de $1 en $1
+    cerca del dinero, así que el strike real más próximo a una banda es esa
+    misma banda redondeada y salían dos filas con los mismos números. Se siguen
+    calculando, eso sí, porque el OTM se mide sobre ellas: son los strikes que
+    de verdad se teclean en la orden.
 
     Los importes van en dólares, no en puntos: el movimiento se calcula en puntos
     del índice, pero se pinta con «$» porque es la unidad con la que se lee una
     orden.
 
     Args:
-        v: ``xsp_motores.Vencimiento``.
+        v: ``condor_motores.Vencimiento``.
 
     Returns:
         Lista de filas ``<tr>`` de ese vencimiento (la card las envuelve).
@@ -165,7 +172,8 @@ def _filas_vencimiento(v) -> list[str]:
 
 
 def _card_volatilidad(a) -> str:
-    """Card de volatilidad: realizada a varias ventanas, VIX y prima."""
+    """Card de volatilidad: realizada a varias ventanas, índice de vol y prima."""
+    s = a.subyacente
     hv_filas = [
         _fila(f"HV {ventana}D", f'<span style="color:#c9d1d9">{fmt_pct_frac(valor)}</span>')
         for ventana, valor in a.hv.items()
@@ -178,16 +186,16 @@ def _card_volatilidad(a) -> str:
         prima_nota = " (vender pagado)" if prima >= 1 else " (vender barato)"
 
     filas = [
-        _fila("Precio XSP", f'<span style="color:{_AZUL}">{fmt_precio(a.precio)}</span>'),
+        _fila(f"Precio {s.etiqueta}", f'<span style="color:{_AZUL}">{fmt_precio(a.precio)}</span>'),
         _fila("Momento", f'<span style="color:{_GRIS}">{a.fecha_precio or "N/A"}</span>'),
-        _fila("VIX", "N/A" if _es_na(a.vix) else f"{a.vix:.2f}%"),
+        _fila(s.nombre_vol, "N/A" if _es_na(a.vol) else f"{a.vol:.2f}%"),
         _fila(
-            "Percentil VIX (5a)",
-            f'<span style="color:{_color_percentil(a.vix_percentil)}">'
-            f'{"N/A" if _es_na(a.vix_percentil) else f"{a.vix_percentil:.1f}%"}</span>',
+            f"Percentil {s.nombre_vol} ({s.anios}a)",
+            f'<span style="color:{_color_percentil(a.vol_percentil)}">'
+            f'{"N/A" if _es_na(a.vol_percentil) else f"{a.vol_percentil:.1f}%"}</span>',
         ),
         _fila(
-            "Prima VIX / HV30",
+            f"Prima {s.nombre_vol} / HV30",
             f'<span{_color_retorno(None if _es_na(prima) else prima - 1)}>{prima_txt}{prima_nota}</span>',
         ),
     ] + hv_filas
@@ -195,10 +203,10 @@ def _card_volatilidad(a) -> str:
     notas = "".join(f'<div class="sub">· {n}</div>' for n in a.notas)
 
     return f"""
-    <div class="macro-card" id="xsp-vol">
+    <div class="macro-card" id="{s.clave}-vol">
         <div class="macro-head">
-            <h3>Volatilidad <span class="ticker">(XSP)</span></h3>
-            <div class="sub">Vol realizada 5a · VIX y prima de volatilidad</div>
+            <h3>Volatilidad <span class="ticker">({s.etiqueta})</span></h3>
+            <div class="sub">Vol realizada {s.anios}a · {s.nombre_vol} y prima de volatilidad</div>
         </div>
         <table class="macro-table">
             {"".join(filas)}
@@ -208,19 +216,20 @@ def _card_volatilidad(a) -> str:
     """
 
 
-def _card_vencimiento(v) -> str:
+def _card_vencimiento(s, v) -> str:
     """Card de un vencimiento del condor: el diario o el semanal, cada uno aparte.
 
     Args:
-        v: ``xsp_motores.Vencimiento``.
+        s: ``condor_motores.Subyacente`` (para el rótulo y el id).
+        v: ``condor_motores.Vencimiento``.
 
     Returns:
         HTML de la card con su IV, su movimiento esperado y sus alas.
     """
     return f"""
-    <div class="macro-card" id="xsp-{_SLUG_VENC.get(v.etiqueta, "vencimiento")}">
+    <div class="macro-card" id="{s.clave}-{_SLUG_VENC.get(v.etiqueta, "vencimiento")}">
         <div class="macro-head">
-            <h3>{v.etiqueta} <span class="ticker">(XSP)</span></h3>
+            <h3>{v.etiqueta} <span class="ticker">({s.etiqueta})</span></h3>
             <div class="sub">Expira {v.fecha} · {v.dte} DTE</div>
         </div>
         <table class="macro-table">
@@ -240,11 +249,12 @@ def _texto_cierre(p) -> str:
     return f" · último cerrado {p.ultimo_fin}" if p.ultimo_fin else ""
 
 
-def _card_periodo(p, desglose: str = "", sub: str = "") -> str:
+def _card_periodo(s, p, desglose: str = "", sub: str = "") -> str:
     """Card de un periodo (día, semana o mes) con su rango medio en %.
 
     Args:
-        p: ``xsp_motores.EstadisticaPeriodo``.
+        s: ``condor_motores.Subyacente`` (para el rótulo y el id).
+        p: ``condor_motores.EstadisticaPeriodo``.
         desglose: Tabla HTML ya montada (por día de la semana o por día del
             mes), o "" si la card no lleva desglose.
         sub: Texto de la cabecera (qué ventana de historia cubre).
@@ -268,9 +278,9 @@ def _card_periodo(p, desglose: str = "", sub: str = "") -> str:
         )
 
     return f"""
-    <div class="macro-card" id="xsp-{_SLUG.get(p.etiqueta, "periodo")}">
+    <div class="macro-card" id="{s.clave}-{_SLUG.get(p.etiqueta, "periodo")}">
         <div class="macro-head">
-            <h3>{p.etiqueta} <span class="ticker">(XSP)</span></h3>
+            <h3>{p.etiqueta} <span class="ticker">({s.etiqueta})</span></h3>
             <div class="sub">{sub}{cierre}</div>
         </div>
         <table class="macro-table">
@@ -373,7 +383,7 @@ def _card_dia_mes(a, cierre: str = "") -> str:
     se sale de la fila o si están todos a la par.
 
     Args:
-        a: ``xsp_motores.AnalisisXSP``.
+        a: ``condor_motores.AnalisisCondor``.
         cierre: Sufijo de fecha ya montado (``_texto_cierre``) para el subtítulo.
 
     Returns:
@@ -381,6 +391,7 @@ def _card_dia_mes(a, cierre: str = "") -> str:
     """
     if not a.por_dia_mes:
         return ""
+    s = a.subyacente
     por_dia = sorted(a.por_dia_mes, key=lambda par: par[0])
     mayor = max(valor for _, valor in a.por_dia_mes)
     bloques = [
@@ -391,30 +402,31 @@ def _card_dia_mes(a, cierre: str = "") -> str:
         f'<div style="flex:1 1 0; min-width:0;">{bloque}</div>' for bloque in bloques
     )
     return f"""
-    <div class="macro-card macro-card--ancha" id="xsp-dia-mes">
+    <div class="macro-card macro-card--ancha" id="{s.clave}-dia-mes">
         <div class="macro-head">
-            <h3>Día del mes <span class="ticker">(XSP)</span></h3>
-            <div class="sub">Rango medio desde el cierre previo · 5 años{cierre}</div>
+            <h3>Día del mes <span class="ticker">({s.etiqueta})</span></h3>
+            <div class="sub">Rango medio desde el cierre previo · {s.anios} años{cierre}</div>
         </div>
         <div style="display:flex; gap:14px; align-items:flex-start;">{columnas}</div>
     </div>
     """
 
 
-def panel_xsp(a) -> str:
-    """Grid con las cards de la pestaña XSP.
+def panel_condor(a) -> str:
+    """Grid con las cards de la pestaña de un subyacente.
 
     Args:
-        a: ``xsp_motores.AnalisisXSP``.
+        a: ``condor_motores.AnalisisCondor``.
 
     Returns:
         HTML del grid (o una card honesta de sin-datos si no hay precio).
     """
+    s = a.subyacente
     if a.precio is None:
         notas = "".join(f'<div class="sub">· {n}</div>' for n in a.notas)
         return (
-            '<div class="macro-card" id="xsp-sin-datos">'
-            "<h3>XSP</h3>"
+            f'<div class="macro-card" id="{s.clave}-sin-datos">'
+            f"<h3>{s.etiqueta}</h3>"
             f'<div class="sub">Sin datos disponibles</div>{notas}'
             "</div>"
         )
@@ -423,25 +435,24 @@ def panel_xsp(a) -> str:
     dia = por_etiqueta.get("Día")
     semana = por_etiqueta.get("Semana")
     mes = por_etiqueta.get("Mes")
+    ventana = f"Rango desde el cierre previo · {s.anios} años"
 
     # Primero el contexto (volatilidad) y luego una card por vencimiento (0 DTE,
     # 1 DTE y semanal), que son los ciclos que se operan.
     cards = [_card_volatilidad(a)]
-    cards += [_card_vencimiento(v) for v in a.vencimientos]
+    cards += [_card_vencimiento(s, v) for v in a.vencimientos]
     if not a.vencimientos:
         cards.append(
-            '<div class="macro-card" id="xsp-vencimientos">'
+            f'<div class="macro-card" id="{s.clave}-vencimientos">'
             "<h3>Vencimientos</h3>"
             '<div class="sub">Cadena de opciones no disponible.</div></div>'
         )
     if dia:
-        cards.append(_card_periodo(
-            dia, _desglose_dow(a), "Rango desde el cierre previo · 5 años",
-        ))
+        cards.append(_card_periodo(s, dia, _desglose_dow(a), ventana))
     if semana:
-        cards.append(_card_periodo(semana, "", "Rango desde el cierre previo · 5 años"))
+        cards.append(_card_periodo(s, semana, "", ventana))
     if mes:
-        cards.append(_card_periodo(mes, "", "Rango desde el cierre previo · 5 años"))
+        cards.append(_card_periodo(s, mes, "", ventana))
         # El desglose del mes vive en su propia card (ancha, al final): dentro de
         # la del mes solo cabían cinco días y enseñar cinco de 31 es enseñar la
         # cabeza de una lista, que se lee como un ranking aunque no lo sea.

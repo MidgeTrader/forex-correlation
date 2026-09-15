@@ -5,8 +5,8 @@ Dashboard de análisis de correlaciones FX y activos macro, generado como un
 solo archivo que se abre en cualquier navegador. Clonar, instalar, generar.
 
 Toda la barra de categorías en una pantalla — desde los iron condors sobre el
-S&P 500 hasta la curva del Tesoro de EE.UU., pasando por el oro y el crudo —
-con las métricas de cada mercado contadas con su propio lenguaje.
+S&P 500 y el Nasdaq-100 hasta la curva del Tesoro de EE.UU., pasando por el oro
+y el crudo — con las métricas de cada mercado contadas con su propio lenguaje.
 
 ## Lo que ves
 
@@ -16,6 +16,7 @@ cards, y cada card habla el idioma de su activo:
 | Categoría | Activos | Qué miran sus cards |
 |---|---|---|
 | **XSP** | Mini-SPX (el S&P 500 ÷ 10): 0 DTE, 1 DTE y semanal | volatilidad realizada y VIX con su percentil, y una card por vencimiento con IV ATM, movimiento esperado 1σ derivado del *straddle*, **ATR(14)** con su banda y bandas 1σ/2σ con su distancia OTM; rangos históricos en % de día, semana y mes |
+| **QQQ** | ETF del Nasdaq-100: 0 DTE, 1 DTE y semanal | las mismas cards que XSP, con **VXN** como índice de volatilidad |
 | **Metales** | Oro, Plata, Cobre, Platino, Paladio | Sharpe, Sortino, Beta, R², Alpha, probabilidades bootstrap, drawdown, momentum |
 | **Energía** | Crudo WTI, Brent, Gas natural, Gasolina, Gasóleo | ídem Metales |
 | **Índices** | S&P 500, Nasdaq 100, DAX, Nikkei 225, DXY | ídem Metales, con SPY de benchmark |
@@ -25,13 +26,25 @@ cards, y cada card habla el idioma de su activo:
 | **Bonos** | Curva del Tesoro EE.UU.: 3M, 2Y, 5Y, 10Y, 30Y | una card por tramo con **precio teórico derivado del yield**, retornos reales del bono, y métricas de mesa: carry, roll-down, duration, DV01 |
 | **Gráficas** | 15 pares + macro | dashboard interactivo (Chart.js/Plotly): correlaciones, volatilidad, **superficie de volatilidad** |
 
-### La sección XSP, en detalle
+### Las secciones de iron condors, en detalle
 
-Es la pestaña de trabajo diario: iron condors sobre el Mini-SPX en ciclo diario
-y semanal, con una card por vencimiento (0 DTE, 1 DTE y semanal). Como el
-subyacente es un índice, todo va en **% del precio** —la unidad con la que se
-comparan entre sí las bandas y los rangos históricos— y los puntos se enseñan al
-lado porque son los que se teclean en la orden.
+Son las pestañas de trabajo diario: **XSP** (Mini-SPX) y **QQQ** (el ETF del
+Nasdaq-100), con iron condors en ciclo diario y semanal, y una card por
+vencimiento (0 DTE, 1 DTE y semanal). Comparten motor y plantillas: lo único que
+cambia entre las dos es el instrumento, que vive en el registro `SUBYACENTES` de
+`scripts/condor_motores.py` (tickers, índice de volatilidad y prefijo de sus
+columnas en caché).
+
+Una pestaña de índice y otra de ETF obligan a una distinción que no es cosmética:
+**un ETF cotiza fuera de horario y un índice no**. Para XSP el último precio es
+el cierre de la sesión de cash, que es contra el que está cotizada la cadena de
+opciones; para QQQ, fuera del horario regular (9:30–16:00 ET) el último precio
+es un precio *after-hours*, así que las bandas van sobre el último cierre y la
+card lo dice. Dentro del horario, las dos usan el precio en vivo.
+
+Como el subyacente es un índice o un ETF, todo va en **% del precio** —la unidad
+con la que se comparan entre sí las bandas y los rangos históricos— y los puntos
+se enseñan al lado porque son los que se teclean en la orden.
 
 Tres decisiones que sostienen las cifras:
 
@@ -91,7 +104,7 @@ carry usa los últimos tipos de reserva verificados. El `.env` nunca se sube.
 
 ## Fuentes
 
-- Precios (XSP, VIX y macro) y pares FX: Yahoo Finance (`yfinance`)
+- Precios (XSP, QQQ, VIX, VXN y macro) y pares FX: Yahoo Finance (`yfinance`)
 - Tipos de interés e inflación: FRED (`fredapi`)
 - Benchmark crypto (NCI): API pública de nasdaq.com
 - Curva del Tesoro: series DGS de FRED (los *Daily Treasury Par Yield Curve

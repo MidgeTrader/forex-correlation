@@ -30,9 +30,8 @@ from macro_motores import analizar_activo  # noqa: E402
 from macro_panel_html import panel_activo  # noqa: E402
 from bonos_motores import analizar_curva  # noqa: E402
 from bonos_panel_html import panel_curva  # noqa: E402
-from xsp_motores import analizar_xsp  # noqa: E402
-from xsp_panel_html import panel_xsp  # noqa: E402
-
+from condor_motores import SUBYACENTES, Subyacente, analizar_condor  # noqa: E402
+from condor_panel_html import panel_condor  # noqa: E402
 # CSS adicional del dashboard (tema FX, misma paleta).
 _CSS_MACRO = """
     /* --- Integración macro: barra de categorías y paneles --- */
@@ -97,13 +96,23 @@ _JS_CATEGORIAS = """
     }
 """
 
-# Orden de las categorías en la barra: XSP primero (es la pestaña de trabajo
-# diario: los iron condors), luego macro + FX (tarjetas) y al final Gráficas
-# (dashboard interactivo FX, renombrado de la antigua pestaña "FX").
-_NAV_ORDER = ["xsp"] + CATEGORIAS_ORDER + ["graficas"]
+# Pestañas de iron condors (una por subyacente de ``SUBYACENTES``), en el orden
+# en que salen en la barra. Van las primeras: son la pestaña de trabajo diario.
+_CLAVES_CONDOR = ["xsp", "qqq"]
 
-# Etiquetas de la barra: las categorías de activos + las secciones propias.
-_ETIQUETAS_NAV = {**CATEGORIAS, "graficas": "Gráficas", "xsp": "XSP"}
+# Orden de las categorías en la barra: los condores primero, luego macro + FX
+# (tarjetas) y al final Gráficas (dashboard interactivo FX, renombrado de la
+# antigua pestaña "FX").
+_NAV_ORDER = _CLAVES_CONDOR + CATEGORIAS_ORDER + ["graficas"]
+
+# Etiquetas de la barra: las categorías de activos + las secciones propias. Las
+# de los condores salen del propio subyacente, para que no puedan desincronizarse
+# del rótulo que pinta la card.
+_ETIQUETAS_NAV = {
+    **CATEGORIAS,
+    "graficas": "Gráficas",
+    **{clave: s.etiqueta for clave, s in SUBYACENTES.items()},
+}
 
 
 def _seccion_bonos(refresh: bool) -> str:
@@ -130,25 +139,26 @@ def _seccion_bonos(refresh: bool) -> str:
     )
 
 
-def _seccion_xsp(refresh: bool) -> str:
-    """Sección de XSP: volatilidad, bandas del condor y rangos por periodo.
+def _seccion_condor(s: Subyacente, refresh: bool) -> str:
+    """Sección de un subyacente de iron condors: volatilidad, bandas y rangos.
 
-    XSP no es un activo macro más (no sale del catálogo): se muestra con su
-    propio motor y sus propias cards, porque lo que se mira aquí son las bandas
-    de un iron condor, no el retorno del activo.
+    Un subyacente de condor no es un activo macro más (no sale del catálogo): se
+    muestra con su propio motor y sus propias cards, porque lo que se mira aquí
+    son las bandas de un iron condor, no el retorno del activo.
 
     Args:
+        s: Subyacente a analizar (de ``SUBYACENTES``).
         refresh: True fuerza la re-descarga de los precios (ignora la caché).
 
     Returns:
-        HTML de la sección: cabecera de categoría + grid con las 4 cards.
+        HTML de la sección: cabecera de categoría + grid con las cards.
     """
-    print("  XSP (volatilidad + condor)...", end="", flush=True)
-    analisis = analizar_xsp(refresh=refresh)
+    print(f"  {s.etiqueta} (volatilidad + condor)...", end="", flush=True)
+    analisis = analizar_condor(s, refresh=refresh)
     print("ok" if analisis.precio is not None else "sin datos")
     return (
-        '<h2 class="cat-header">XSP · Iron Condors</h2>\n'
-        '<div class="macro-grid">\n' + panel_xsp(analisis) + "\n</div>"
+        f'<h2 class="cat-header">{s.etiqueta} · Iron Condors</h2>\n'
+        '<div class="macro-grid">\n' + panel_condor(analisis) + "\n</div>"
     )
 
 
@@ -261,28 +271,33 @@ def generar_dashboard(refresh: bool = False) -> str:
     body_fx = body_fx.replace(header_global, "")
 
     print("Analizando activos macro y pares FX...")
-    secciones_macro = []
+    secciones: dict[str, str] = {}
+
+    # Los condores van primero, igual que en la barra.
+    for clave in _CLAVES_CONDOR:
+        secciones[clave] = _seccion_condor(SUBYACENTES[clave], refresh)
+
     for cat in CATEGORIAS_ORDER:
         print(f"[{CATEGORIAS[cat]}]")
-        # La pestaña FX (tarjetas de los 7 mayores) es la visible por defecto.
-        cls = " active" if cat == "fx" else ""
-        seccion = _seccion_bonos(refresh) if cat == "bonos" else _seccion_macro(cat, refresh)
-        secciones_macro.append(
-            f'<section id="cat-{cat}" class="cat-section{cls}">\n{seccion}\n</section>'
-        )
+        secciones[cat] = _seccion_bonos(refresh) if cat == "bonos" else _seccion_macro(cat, refresh)
 
-    # Sección XSP (iron condors): va la primera en el HTML para que el botón
-    # del nav (que ya la precede) y la sección sigan el mismo orden.
-    seccion_xsp = (
-        '<section id="cat-xsp" class="cat-section">\n'
-        + _seccion_xsp(refresh)
-        + "\n</section>"
-    )
-
-    secciones = seccion_xsp + "\n" + "\n".join(secciones_macro)
     # Sección "Gráficas": el dashboard interactivo FX (renombrado de la antigua
     # pestaña FX). Queda detrás de la pestaña FX de tarjetas.
-    seccion_graficas = '<section id="cat-graficas" class="cat-section">\n' + body_fx + "\n</section>"
+    secciones["graficas"] = body_fx
+
+    # Una sola fuente de orden: los botones del nav y las secciones se emiten
+    # recorriendo el MISMO ``_NAV_ORDER``. Antes los botones lo iteraban pero las
+    # secciones se concatenaban a mano en otro sitio, y con más de un subyacente
+    # eso se desincroniza sin que nada proteste (el nav mostraría una pestaña que
+    # no lleva a ninguna parte).
+    cuerpo = []
+    for clave in _NAV_ORDER:
+        # La pestaña FX (tarjetas de los 7 mayores) es la visible por defecto.
+        cls = " active" if clave == "fx" else ""
+        cuerpo.append(
+            f'<section id="cat-{clave}" class="cat-section{cls}">\n{secciones[clave]}\n</section>'
+        )
+    secciones_html = "\n".join(cuerpo)
 
     html = f"""<!DOCTYPE html>
 <html lang="es">
@@ -296,8 +311,7 @@ def generar_dashboard(refresh: bool = False) -> str:
 <div class="container">
 {header_global}
 {_nav()}
-{secciones}
-{seccion_graficas}
+{secciones_html}
 </div>
 <script>
 {_JS_CATEGORIAS}

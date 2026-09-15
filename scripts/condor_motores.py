@@ -1,24 +1,32 @@
-"""Motor de la pestaña XSP: volatilidad, condor de opciones y rangos por periodo.
+"""Motor de las pestañas de iron condors: volatilidad, opciones y rangos por periodo.
 
-XSP es el subyacente de los iron condors que se analizan aquí, así que **todo se
-expresa en % del precio** — la unidad con la que se comparan entre sí los strikes, las
-bandas de movimiento esperado y los rangos históricos. Los puntos se muestran
-al lado porque son los que se teclean en la orden, nunca en lugar del %.
+Cada pestaña es una entrada de ``SUBYACENTES`` (hoy XSP, el Mini-SPX, y QQQ, el ETF
+del Nasdaq-100). El módulo no sabe de ninguno en particular: lo que cambia de uno a
+otro —los tickers, el nombre de su índice de volatilidad, su caché— viaja en el
+``Subyacente``, y lo que se calcula es idéntico, así que se escribe una sola vez.
+
+El subyacente es el instrumento sobre el que se venden los iron condors, así que **todo
+se expresa en % del precio** — la unidad con la que se comparan entre sí los strikes,
+las bandas de movimiento esperado y los rangos históricos. Los puntos se muestran al
+lado porque son los que se teclean en la orden, nunca en lugar del % (en dólares cuando
+el subyacente es un ETF, que es como se lee su orden).
 
 Tres bloques, todos con datos reales o ``N/A`` honesto:
 
   1. VOLATILIDAD — volatilidad realizada (HV) a 10/20/30/60/90 días anualizada,
-     VIX y su percentil sobre 5 años, y la prima de volatilidad (VIX / HV30).
+     el índice de volatilidad del subyacente (VIX para XSP, VXN para QQQ) con su
+     percentil sobre la historia pedida, y la prima de volatilidad (VIX / HV30).
   2. OPCIONES — para los vencimientos 0 DTE (la expiración de HOY), 1 DTE (la de
      mañana) y SEMANAL (el primer viernes), la IV ATM, el movimiento esperado
      (1σ) en % y en $, el ATR de referencia con su banda, y las bandas 1σ/2σ con
      su distancia OTM medida sobre los strikes reales de la cadena (las alas del
-     condor, que se calculan para el OTM pero no se pintan: en XSP el strike va
-     de $1 en $1 y coinciden con la banda redondeada).
-  3. RANGOS POR PERIODO — cuánto se mueve XSP, en %, en un día, una semana y un
-     mes (media, mediana y último cerrado), con el desglose por día de la semana
-     y por día del mes. Es la versión en % de las tablas de pips del dashboard
-     FX: aquí no hay pips que valgan, hay porcentaje del precio.
+     condor, que se calculan para el OTM pero no se pintan: en los subyacentes de
+     hoy el strike va de $1 en $1 cerca del dinero, así que coinciden con la
+     banda redondeada y saldrían dos filas con los mismos números).
+  3. RANGOS POR PERIODO — cuánto se mueve el subyacente, en %, en un día, una
+     semana y un mes (media, mediana y último cerrado), con el desglose por día
+     de la semana y por día del mes. Es la versión en % de las tablas de pips del
+     dashboard FX: aquí no hay pips que valgan, hay porcentaje del precio.
 
 MOVIMIENTO ESPERADO (1σ) — se deriva del straddle ATM, no de la IV cruda de
 Yahoo, que sale ruidosa en strikes ilíctos (se han visto IV del 240 % en un
@@ -56,17 +64,20 @@ range, que INCLUYE el hueco de apertura, mientras que el rango de la card «Día
 es alto−bajo a secas y no lo incluye; las dos cifras se parecen, pero no son lo
 mismo.
 
-Caché: los precios viven en ``data/xsp_precios.csv`` (XSP + VIX, 5 años, con
-auto-refresh si quedan por detrás del último día hábil) con el mismo patrón que
-el resto del dashboard. La cadena de opciones NO se cachea: es una foto del
-momento y caduca en minutos.
+Caché: los precios de cada subyacente viven en ``data/{clave}_precios.csv`` (él y su
+índice de volatilidad, con las columnas prefijadas por su nombre —``XSP_Close`` frente
+a ``QQQ_Close``— para que cada fichero se lea solo) con auto-refresh si quedan por
+detrás del último día hábil, el mismo patrón que el resto del dashboard. La cadena de
+opciones NO se cachea: es una foto del momento y caduca en minutos.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import time
 from pathlib import Path
 from typing import Final, Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -75,14 +86,15 @@ import yfinance as yf
 # Caché en disco: `data/` en la raíz del proyecto (un nivel por encima de scripts/).
 DATA_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "data"
 
-TICKER_XSP: Final[str] = "^XSP"
-TICKER_VIX: Final[str] = "^VIX"
-
-# Historia pedida por el usuario para el percentil del VIX y las medias de rango.
-HISTORIA_ANIOS: Final[int] = 5
-
 # Sesiones de bolsa al año para anualizar la volatilidad realizada.
 DIAS_ANIO: Final[int] = 252
+
+# Horario regular del mercado de EE.UU. en su propio huso. Solo lo necesita el spot de
+# los subyacentes que cotizan TAMBIÉN fuera de hora (ver ``cotiza_extendido``): fuera de
+# este tramo su «último precio» no es el que la cadena de opciones está mirando.
+ZONA_MERCADO: Final[ZoneInfo] = ZoneInfo("America/New_York")
+APERTURA_MERCADO: Final[time] = time(9, 30)
+CIERRE_MERCADO: Final[time] = time(16, 0)
 
 # Ventanas de la volatilidad realizada (días de cotización).
 VENTANAS_HV: Final[tuple[int, ...]] = (10, 20, 30, 60, 90)
@@ -112,6 +124,104 @@ _NOMBRES_DOW: Final[dict[int, str]] = {
 
 
 # ---------------------------------------------------------------------------
+# Subyacentes
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Subyacente:
+    """Un instrumento sobre el que se venden iron condors.
+
+    Todo lo que distingue una pestaña de otra vive aquí; el resto del módulo es común a
+    todas. La ``etiqueta`` hace además de prefijo de las columnas de su caché
+    (``XSP_Close`` frente a ``QQQ_Close``), de modo que cada fichero de ``data/`` se lee
+    solo y no depende de con qué pestaña se abrió.
+
+    Attributes:
+        clave: Identificador corto (``xsp``): ids de las cards, clave del nav y nombre
+            del fichero de caché (``data/{clave}_precios.csv``). Acaba en un ``id`` de
+            HTML y en una ruta, así que es minúscula y ASCII.
+        etiqueta: Nombre que se pinta (``XSP``) y prefijo de las columnas en disco.
+        ticker: Símbolo de Yahoo del subyacente (``^XSP``, ``QQQ``).
+        ticker_vol: Símbolo de Yahoo de su índice de volatilidad (``^VIX``, ``^VXN``).
+        nombre_vol: Cómo se llama ese índice (``VIX``, ``VXN``): se pinta en las filas y
+            es el prefijo de su columna en la caché.
+        cotiza_extendido: True si el subyacente cotiza TAMBIÉN fuera del horario regular
+            (un ETF). Su «último precio» puede ser entonces de after-hours, mientras que
+            la cadena de opciones está cotizada contra el cierre de la sesión; fuera de
+            horario se usa el cierre, que es el precio con el que la cadena está de
+            acuerdo. Un índice no tiene este problema (``False``).
+        anios: Años de historia para el percentil y las medias de rango.
+    """
+
+    clave: str
+    etiqueta: str
+    ticker: str
+    ticker_vol: str
+    nombre_vol: str
+    cotiza_extendido: bool
+    anios: int = 5
+
+    @property
+    def columnas_disco(self) -> dict[str, str]:
+        """``{nombre en el CSV: nombre interno}`` de la caché de precios.
+
+        Las columnas se guardan con el nombre del subyacente delante para que el CSV se
+        lea solo; dentro del módulo se trabaja con nombres genéricos, de modo que los
+        cálculos no sepan de quién es la serie. El renombrado vive únicamente aquí, en
+        las dos funciones que tocan el disco.
+        """
+        return {
+            f"{self.etiqueta}_Close": "Close",
+            f"{self.etiqueta}_High": "High",
+            f"{self.etiqueta}_Low": "Low",
+            f"{self.nombre_vol}_Close": "Vol_Close",
+        }
+
+    @property
+    def columnas_internas(self) -> dict[str, str]:
+        """El inverso de ``columnas_disco``: ``{nombre interno: nombre en el CSV}``."""
+        return {interno: disco for disco, interno in self.columnas_disco.items()}
+
+    @property
+    def ruta_cache(self) -> Path:
+        """Fichero de caché de precios de este subyacente dentro de ``data/``."""
+        return DATA_DIR / f"{self.clave}_precios.csv"
+
+
+# Las pestañas de iron condors. El orden en que se pintan NO se decide aquí (es cosa de
+# `generar_dashboard`, la raíz de composición): esto es solo el registro.
+SUBYACENTES: Final[dict[str, Subyacente]] = {
+    "xsp": Subyacente(
+        clave="xsp",
+        etiqueta="XSP",
+        ticker="^XSP",
+        ticker_vol="^VIX",
+        nombre_vol="VIX",
+        cotiza_extendido=False,
+    ),
+    "qqq": Subyacente(
+        clave="qqq",
+        etiqueta="QQQ",
+        ticker="QQQ",
+        ticker_vol="^VXN",
+        nombre_vol="VXN",
+        cotiza_extendido=True,
+    ),
+}
+
+# La clave acaba en un `id` de HTML y en un nombre de fichero: una mayúscula o un acento
+# rompería el primero o el segundo. Se comprueba al importar para que el fallo salte aquí
+# y no a mitad del render.
+for _subyacente in SUBYACENTES.values():
+    if not (_subyacente.clave.isascii() and _subyacente.clave.islower()
+            and _subyacente.clave.isalnum()):
+        raise ValueError(
+            f"Clave de subyacente inválida: {_subyacente.clave!r} "
+            "(tiene que ser minúscula, ASCII y alfanumérica: va a un id de HTML y a una ruta)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Estructuras de resultado
 # ---------------------------------------------------------------------------
 
@@ -119,13 +229,13 @@ _NOMBRES_DOW: Final[dict[int, str]] = {
 class ATR:
     """Average True Range de referencia, leído en el último periodo CERRADO.
 
-    Contesta a «¿cuánto se mueve XSP de verdad?» frente al 1σ de la card, que
+    Contesta a «¿cuánto se mueve el subyacente de verdad?» frente al 1σ de la card, que
     contesta «¿cuánto dice el mercado que se va a mover?». Se lee en el cierre
     anterior a propósito: el ATR que decide una entrada es el que se ve al
     entrar, no el que se completa después con la sesión que ya se está operando.
 
     Attributes:
-        valor: ATR en puntos de XSP.
+        valor: ATR en puntos del subyacente.
         pct: ATR como fracción del precio de referencia (0.012 = 1.2 %).
         desde: Última SESIÓN del periodo del que sale el ATR (ISO).
         etiqueta: ``ATR(14) diario`` o ``ATR(14) semanal``.
@@ -156,15 +266,15 @@ class Vencimiento:
         dte: Días naturales hasta la expiración.
         strike_atm: Strike más cercano al dinero usado para leer la IV.
         iv: IV ATM en fracción anualizada (0.136 = 13.6 %), o None.
-        sigma_puntos: Movimiento esperado 1σ en puntos de XSP, o None.
+        sigma_puntos: Movimiento esperado 1σ en puntos del subyacente, o None.
         sigma_pct: Movimiento esperado 1σ en % del precio, o None.
         banda1: ``(inferior, superior)`` a 1σ en puntos, o None.
         banda2: ``(inferior, superior)`` a 2σ en puntos, o None.
         ala1: Strikes REALES de la cadena más próximos a ±1σ (put, call), o None.
-            No se pintan en la card (en XSP el strike va de $1 en $1, así que
-            coinciden con la banda redondeada y salían dos filas idénticas),
-            pero se calculan: el OTM se mide sobre ellos, que son los strikes
-            que de verdad se teclean en la orden.
+            No se pintan en la card (en los subyacentes de hoy el strike va de $1 en
+            $1 cerca del dinero, así que coinciden con la banda redondeada y salían
+            dos filas idénticas), pero se calculan: el OTM se mide sobre ellos, que
+            son los strikes que de verdad se teclean en la orden.
         ala2: Strikes reales más próximos a ±2σ (put, call), o None.
         banda_atr: ``(inferior, superior)`` a ±1 ATR sobre el mismo spot, o None.
             Es el contraste de la banda σ: el mismo spot, pero movido por lo que
@@ -214,16 +324,21 @@ class EstadisticaPeriodo:
 
 
 @dataclass(frozen=True)
-class AnalisisXSP:
-    """Resultado completo de la pestaña XSP.
+class AnalisisCondor:
+    """Resultado completo de una pestaña de iron condors.
+
+    Lleva dentro el ``subyacente`` del que salen las cifras, y no es un adorno: el panel
+    construye los rótulos a partir de él, así que las cifras de un subyacente no pueden
+    pintarse bajo el nombre de otro.
 
     Attributes:
-        precio: Último precio disponible de XSP (spot si la cadena responde).
+        subyacente: El instrumento analizado, o sea de quién son estas cifras.
+        precio: Último precio disponible (spot si la cadena responde).
         fecha_precio: Fecha (y hora, si es spot) del precio mostrado.
         hv: ``{ventana: fracción anualizada}`` de volatilidad realizada.
-        vix: Último cierre del VIX.
-        vix_percentil: Percentil del VIX dentro de la historia (0-100).
-        prima_vol: VIX / HV30 (la prima de volatilidad; < 1 = vender barato).
+        vol: Último cierre de su índice de volatilidad (VIX en XSP, VXN en QQQ).
+        vol_percentil: Percentil de ese índice dentro de la historia (0-100).
+        prima_vol: Índice de volatilidad / HV30 (la prima; < 1 = vender barato).
         vencimientos: Los vencimientos (0 DTE, 1 DTE y semanal) con sus bandas.
         periodos: Estadísticas de día, semana y mes.
         por_dia_semana: ``[(nombre, arriba %, abajo %, total %)]`` de lunes a
@@ -233,11 +348,12 @@ class AnalisisXSP:
         notas: Avisos honestos de qué no se pudo calcular y por qué.
     """
 
+    subyacente: Subyacente
     precio: Optional[float] = None
     fecha_precio: str = ""
     hv: dict[int, Optional[float]] = field(default_factory=dict)
-    vix: Optional[float] = None
-    vix_percentil: Optional[float] = None
+    vol: Optional[float] = None
+    vol_percentil: Optional[float] = None
     prima_vol: Optional[float] = None
     vencimientos: list[Vencimiento] = field(default_factory=list)
     periodos: list[EstadisticaPeriodo] = field(default_factory=list)
@@ -250,34 +366,53 @@ class AnalisisXSP:
 # Precios (con caché en disco)
 # ---------------------------------------------------------------------------
 
-def _ruta_cache() -> Path:
-    """Ruta del CSV de caché de precios de XSP y VIX."""
-    return DATA_DIR / "xsp_precios.csv"
+def _cache_ok(s: Subyacente) -> Optional[pd.DataFrame]:
+    """Carga la caché de precios del subyacente si sirve; si no, None.
 
+    El orden de las comprobaciones importa: el esquema se valida ANTES que la fecha. Un
+    CSV con otras columnas no es una caché «fresca pero rara», es un fichero que no se
+    puede usar. Detectar eso al principio evita el fallo tardío que salía si no: se leía
+    con nombres genéricos un CSV con columnas prefijadas y reventaba con un KeyError a
+    mitad del análisis, con todo lo demás ya descargado y sin llegar a escribir el HTML.
 
-def _cache_ok() -> Optional[pd.DataFrame]:
-    """Carga la caché de precios si existe y está al día; si no, None."""
-    ruta = _ruta_cache()
-    if not ruta.exists():
+    Args:
+        s: Subyacente cuya caché se quiere.
+
+    Returns:
+        Los precios con nombres de columna genéricos, o None si no hay caché utilizable
+        (no existe, está corrupta, es de otro subyacente o se queda atrás).
+    """
+    if not s.ruta_cache.exists():
         return None
     try:
-        df = pd.read_csv(ruta, index_col=0, parse_dates=True)
-        if df.empty:
-            return None
-        if df.index.max().normalize() < _ULTIMO_OK:
-            return None  # caché desactualizada → re-descargar
-        return df
+        df = pd.read_csv(s.ruta_cache, index_col=0, parse_dates=True)
     except Exception:
         return None  # caché corrupta → re-descargar
+    if df.empty:
+        return None
+
+    columnas = s.columnas_disco
+    if set(df.columns) != set(columnas):
+        # Se dice en voz alta a propósito: `data/` está fuera de git, así que este aviso
+        # es el único rastro que queda de que la caché se descartó.
+        print(f"  Caché de {s.etiqueta} con columnas inesperadas "
+              f"({', '.join(map(str, df.columns))}): se re-descarga.")
+        return None
+
+    if df.index.max().normalize() < _ULTIMO_OK:
+        return None  # caché desactualizada → re-descargar
+
+    return df.rename(columns=columnas)
 
 
 def _a_fechas(serie: pd.DataFrame) -> pd.DataFrame:
     """Reindexa un histórico de Yahoo por fecha (sin hora y sin zona horaria).
 
     yfinance 1.7 devuelve el índice con zona horaria y con la hora de sesión,
-    de modo que XSP y VIX llegan con timestamps distintos para el MISMO día: al
-    combinarlos, pandas no encuentra ni una fecha en común y el join se queda
-    vacío. Se normaliza a fecha pura antes de cruzar las dos series.
+    de modo que el subyacente y su índice de volatilidad llegan con timestamps
+    distintos para el MISMO día: al combinarlos, pandas no encuentra ni una fecha
+    en común y el join se queda vacío. Se normaliza a fecha pura antes de cruzar
+    las dos series.
 
     Args:
         serie: Histórico diario de yfinance.
@@ -294,62 +429,68 @@ def _a_fechas(serie: pd.DataFrame) -> pd.DataFrame:
     return serie[~serie.index.duplicated(keep="last")]
 
 
-def _descargar_precios() -> Optional[pd.DataFrame]:
-    """Descarga 5 años de XSP (OHLC) y del VIX (cierre) desde Yahoo.
+def _descargar_precios(s: Subyacente) -> Optional[pd.DataFrame]:
+    """Descarga la historia del subyacente (OHLC) y de su volatilidad (cierre) de Yahoo.
+
+    Args:
+        s: Subyacente a descargar.
 
     Returns:
-        DataFrame con ``XSP_Close``, ``XSP_High``, ``XSP_Low`` y ``VIX_Close``
-        indexado por fecha, o None si Yahoo no responde o falta alguna columna
-        (fallo seguro: la card muestra N/A, nunca un valor inventado).
+        DataFrame con ``Close``, ``High``, ``Low`` y ``Vol_Close`` indexado por fecha, o
+        None si Yahoo no responde o falta alguna columna (fallo seguro: la card muestra
+        N/A, nunca un valor inventado).
     """
     try:
-        xsp = yf.Ticker(TICKER_XSP).history(period=f"{HISTORIA_ANIOS}y", interval="1d")
-        vix = yf.Ticker(TICKER_VIX).history(period=f"{HISTORIA_ANIOS}y", interval="1d")
+        indice = yf.Ticker(s.ticker).history(period=f"{s.anios}y", interval="1d")
+        vol = yf.Ticker(s.ticker_vol).history(period=f"{s.anios}y", interval="1d")
     except Exception:
         return None  # sin red / Yahoo caído
 
-    if xsp.empty or vix.empty:
+    if indice.empty or vol.empty:
         return None
 
-    xsp, vix = _a_fechas(xsp), _a_fechas(vix)
+    indice, vol = _a_fechas(indice), _a_fechas(vol)
 
     try:
         df = pd.DataFrame({
-            "XSP_Close": xsp["Close"],
-            "XSP_High": xsp["High"],
-            "XSP_Low": xsp["Low"],
-            "VIX_Close": vix["Close"],
+            "Close": indice["Close"],
+            "High": indice["High"],
+            "Low": indice["Low"],
+            "Vol_Close": vol["Close"],
         })
     except KeyError:
         return None  # Yahoo cambió el esquema de columnas
 
-    # Join interno: un día sin VIX (o sin XSP) no se rellena a ojo, se descarta.
+    # Join interno: un día sin el índice de volatilidad (o sin el subyacente) no se
+    # rellena a ojo, se descarta.
     df = df.dropna(how="any")
     return df if not df.empty else None
 
 
-def analizar_precios(refresh: bool = False) -> Optional[pd.DataFrame]:
-    """Precios de XSP y VIX (5 años) indexados por fecha, o None sin datos.
+def analizar_precios(s: Subyacente, refresh: bool = False) -> Optional[pd.DataFrame]:
+    """Precios del subyacente y de su índice de volatilidad, o None sin datos.
 
     Args:
+        s: Subyacente a analizar.
         refresh: True fuerza la re-descarga (ignora la caché en disco).
 
     Returns:
         DataFrame de ``_descargar_precios``, o None si no hay forma de obtenerlo.
     """
     if not refresh:
-        cached = _cache_ok()
+        cached = _cache_ok(s)
         if cached is not None:
             return cached
 
-    df = _descargar_precios()
+    df = _descargar_precios(s)
     if df is None:
         return None
 
     try:
-        ruta = _ruta_cache()
-        ruta.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(ruta)
+        # Se guarda con las columnas del subyacente (`XSP_Close`, `QQQ_Close`) para que
+        # el CSV se lea solo; dentro del módulo se usan los nombres genéricos.
+        s.ruta_cache.parent.mkdir(parents=True, exist_ok=True)
+        df.rename(columns=s.columnas_internas).to_csv(s.ruta_cache)
     except OSError:
         pass  # sin permiso de escritura: se sigue con datos en memoria
 
@@ -381,34 +522,33 @@ def _volatilidad_realizada(close: pd.Series, ventana: int) -> Optional[float]:
 
 
 def analizar_volatilidad(df: pd.DataFrame) -> dict:
-    """Volatilidad realizada a varias ventanas, VIX y su percentil.
+    """Volatilidad realizada a varias ventanas, índice de volatilidad y percentil.
 
     Args:
         df: DataFrame de ``analizar_precios``.
 
     Returns:
-        Dict con ``hv`` ({ventana: fracción}), ``vix``, ``vix_percentil``
-        (0-100) y ``prima_vol`` (VIX / HV30; < 1 significa que el mercado paga
-        menos volatilidad de la que el activo se mueve). Los campos que no se
-        puedan calcular salen None.
+        Dict con ``hv`` ({ventana: fracción}), ``vol``, ``vol_percentil`` (0-100) y
+        ``prima_vol`` (índice / HV30; < 1 significa que el mercado paga menos volatilidad
+        de la que el activo se mueve). Los campos que no se puedan calcular salen None.
     """
-    close = df["XSP_Close"]
+    close = df["Close"]
     hv = {v: _volatilidad_realizada(close, v) for v in VENTANAS_HV}
 
-    vix_serie = df["VIX_Close"].dropna()
-    vix = float(vix_serie.iloc[-1]) if len(vix_serie) else None
-    # El VIX se publica en puntos de volatilidad (16.84 = 16.84 % anualizado),
+    vol_serie = df["Vol_Close"].dropna()
+    vol = float(vol_serie.iloc[-1]) if len(vol_serie) else None
+    # El índice se publica en puntos de volatilidad (16.84 = 16.84 % anualizado),
     # así que se compara directamente con la HV (fracción → %).
     percentil = (
-        float((vix_serie <= vix).mean() * 100) if vix is not None and len(vix_serie) else None
+        float((vol_serie <= vol).mean() * 100) if vol is not None and len(vol_serie) else None
     )
 
     prima = None
     hv30 = hv.get(30)
-    if vix is not None and hv30:
-        prima = float((vix / 100) / hv30)
+    if vol is not None and hv30:
+        prima = float((vol / 100) / hv30)
 
-    return {"hv": hv, "vix": vix, "vix_percentil": percentil, "prima_vol": prima}
+    return {"hv": hv, "vol": vol, "vol_percentil": percentil, "prima_vol": prima}
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +602,7 @@ def _analizar_vencimiento(ticker: yf.Ticker, exp: str, etiqueta: str, spot: floa
         ticker: Ticker de yfinance ya construido.
         exp: Fecha de expiración (ISO).
         etiqueta: ``0 DTE``, ``1 DTE`` o ``Semanal``.
-        spot: Precio actual de XSP.
+        spot: Precio actual del subyacente.
         atr: ATR de referencia del ciclo al que pertenece este vencimiento.
 
     Returns:
@@ -544,10 +684,10 @@ def _analizar_vencimiento(ticker: yf.Ticker, exp: str, etiqueta: str, spot: floa
     )
 
 
-def analizar_opciones(spot: float, atr_diario: Optional[ATR] = None,
+def analizar_opciones(s: Subyacente, spot: float, atr_diario: Optional[ATR] = None,
                       atr_diario_hoy: Optional[ATR] = None,
                       atr_semanal: Optional[ATR] = None) -> list[Vencimiento]:
-    """Vencimientos 0 DTE, 1 DTE y semanal de XSP con su movimiento esperado.
+    """Vencimientos 0 DTE, 1 DTE y semanal del subyacente con su movimiento esperado.
 
     Se eligen por criterio de calendario, no a ojo:
       - **0 DTE**: la expiración de HOY (el ciclo de entrada del día).
@@ -561,7 +701,8 @@ def analizar_opciones(spot: float, atr_diario: Optional[ATR] = None,
     se pintan (queda solo la semanal), que es lo honesto.
 
     Args:
-        spot: Precio actual de XSP (referencia del dinero y de las bandas).
+        s: Subyacente cuya cadena se lee.
+        spot: Precio actual del subyacente (referencia del dinero y de las bandas).
         atr_diario: ATR diario cerrado —el de ayer al cierre—, el del ciclo de
             0 DTE.
         atr_diario_hoy: ATR diario con la sesión de HOY dentro, el del ciclo de
@@ -573,7 +714,7 @@ def analizar_opciones(spot: float, atr_diario: Optional[ATR] = None,
         Lista de ``Vencimiento`` (vacía si Yahoo no da la cadena).
     """
     try:
-        ticker = yf.Ticker(TICKER_XSP)
+        ticker = yf.Ticker(s.ticker)
         expiraciones = list(ticker.options)
     except Exception:
         return []
@@ -705,29 +846,30 @@ def _atr_de(df: pd.DataFrame, freq: str, etiqueta: str,
     """
     periodos = df.index.to_period(freq)
     ohlc = pd.DataFrame({
-        "XSP_High": df["XSP_High"].groupby(periodos).max(),
-        "XSP_Low": df["XSP_Low"].groupby(periodos).min(),
-        "XSP_Close": df["XSP_Close"].groupby(periodos).last(),
+        "High": df["High"].groupby(periodos).max(),
+        "Low": df["Low"].groupby(periodos).min(),
+        "Close": df["Close"].groupby(periodos).last(),
         # Última SESIÓN real del periodo: en las semanas, el viernes; si el
         # viernes fue festivo, el jueves. Se guarda la fecha de cotización y no
         # el ``end_time`` del periodo, que en una semana festiva daría un
         # viernes sin sesión (el mismo detalle que en ``EstadisticaPeriodo``).
-        "XSP_Fin": df.index.to_series().groupby(periodos).max(),
+        # El nombre lo dice: no es un precio más del marco.
+        "Fin_Periodo": df.index.to_series().groupby(periodos).max(),
     })
     marco = ohlc if incluir_en_curso else _partir_cerrados(ohlc, ultima_fecha)
     if marco.empty:
         return None
 
-    serie = _atr_wilder(marco["XSP_High"], marco["XSP_Low"], marco["XSP_Close"])
+    serie = _atr_wilder(marco["High"], marco["Low"], marco["Close"])
     if serie.empty:
         return None
 
     valor = float(serie.iloc[-1])
-    referencia = float(marco["XSP_Close"].iloc[-1])
+    referencia = float(marco["Close"].iloc[-1])
     if not np.isfinite(valor) or referencia <= 0:
         return None
 
-    fin = marco["XSP_Fin"].iloc[-1]
+    fin = marco["Fin_Periodo"].iloc[-1]
     return ATR(
         valor=valor,
         # El % se toma sobre el cierre del propio periodo usado, nunca sobre el
@@ -779,9 +921,9 @@ def _rangos_por_periodo(df: pd.DataFrame, freq: str) -> pd.Series:
         historia (el primero) se descartan, no se rellenan.
     """
     periodos = df.index.to_period(freq)
-    altos = df["XSP_High"].groupby(periodos).max()
-    bajos = df["XSP_Low"].groupby(periodos).min()
-    cierres = df["XSP_Close"]
+    altos = df["High"].groupby(periodos).max()
+    bajos = df["Low"].groupby(periodos).min()
+    cierres = df["Close"]
 
     filas: dict[pd.Period, float] = {}
     for periodo in altos.index:
@@ -819,9 +961,9 @@ def _excursiones_diarias(df: pd.DataFrame, ultima_fecha: pd.Timestamp) -> pd.Dat
     """
     periodos = df.index.to_period("D")
     tabla = pd.DataFrame({
-        "alto": df["XSP_High"].groupby(periodos).max(),
-        "bajo": df["XSP_Low"].groupby(periodos).min(),
-        "previo": df["XSP_Close"].shift(1).groupby(periodos).last(),
+        "alto": df["High"].groupby(periodos).max(),
+        "bajo": df["Low"].groupby(periodos).min(),
+        "previo": df["Close"].shift(1).groupby(periodos).last(),
     }).dropna()
     tabla = tabla[tabla["previo"] > 0]  # sin referencia previa no hay % honesto
     tabla = _partir_cerrados(tabla, ultima_fecha)
@@ -925,18 +1067,43 @@ def analizar_rangos(df: pd.DataFrame) -> dict:
 # Punto de entrada
 # ---------------------------------------------------------------------------
 
-def _spot(precio_cierre: float) -> tuple[float, str, Optional[str]]:
-    """Precio de XSP para las bandas: spot en vivo si se puede, si no el cierre.
+def _en_horario_regular() -> bool:
+    """True si el mercado de EE.UU. está en su sesión regular (9:30-16:00 ET, L-V).
+
+    Los festivos no se contemplan, y da igual: en un festivo no hay sesión, pero tampoco
+    precio nuevo, así que el último cierre sigue siendo la respuesta correcta.
+    """
+    ahora = pd.Timestamp.now(tz=ZONA_MERCADO)
+    if ahora.weekday() >= 5:
+        return False
+    return APERTURA_MERCADO <= ahora.time() <= CIERRE_MERCADO
+
+
+def _spot(s: Subyacente, precio_cierre: float) -> tuple[float, str, Optional[str]]:
+    """Precio del subyacente para las bandas: spot en vivo si se puede, si no el cierre.
 
     Args:
+        s: Subyacente del que se quiere el precio.
         precio_cierre: Último cierre del histórico.
 
     Returns:
-        ``(precio, texto_de_fecha, nota)``: la nota avisa cuando se usa el
-        cierre en lugar del spot (mercado cerrado o Yahoo sin respuesta).
+        ``(precio, texto_de_fecha, nota)``: la nota avisa cuando se usa el cierre en lugar
+        del spot (mercado cerrado, fuera de horario en un ETF, o Yahoo sin respuesta).
     """
+    # Un ETF cotiza también fuera del horario regular, así que su «último precio» puede
+    # ser de after-hours mientras la cadena de opciones sigue cotizada contra el cierre de
+    # la sesión. Las bandas van contra el precio con el que la cadena está de acuerdo, que
+    # es ese cierre. Un índice no tiene el problema: no cotiza fuera de hora, su último
+    # precio ya es el de la sesión.
+    if s.cotiza_extendido and not _en_horario_regular():
+        return precio_cierre, "último cierre", (
+            f"Fuera del horario regular de EE.UU.: las bandas van sobre el último cierre "
+            f"de {s.etiqueta}, que es contra el que cotiza la cadena de opciones "
+            "(el ETF sí sigue cotizando fuera de hora)."
+        )
+
     try:
-        vivo = yf.Ticker(TICKER_XSP).fast_info.get("lastPrice")
+        vivo = yf.Ticker(s.ticker).fast_info.get("lastPrice")
         if vivo is not None and float(vivo) > 0:
             return float(vivo), f"spot {pd.Timestamp.now():%Y-%m-%d %H:%M}", None
     except Exception:
@@ -944,29 +1111,31 @@ def _spot(precio_cierre: float) -> tuple[float, str, Optional[str]]:
     return precio_cierre, "último cierre", "Spot no disponible: bandas sobre el último cierre."
 
 
-def analizar_xsp(refresh: bool = False) -> AnalisisXSP:
-    """Análisis completo de XSP para la pestaña: vol, opciones y rangos.
+def analizar_condor(s: Subyacente, refresh: bool = False) -> AnalisisCondor:
+    """Análisis completo de un subyacente para su pestaña: vol, opciones y rangos.
 
     Args:
+        s: Subyacente a analizar.
         refresh: True fuerza la re-descarga de precios (ignora la caché).
 
     Returns:
-        El ``AnalisisXSP``; si no hay precios, un resultado con ``precio=None``
+        El ``AnalisisCondor``; si no hay precios, un resultado con ``precio=None``
         y la nota del fallo (la card se pinta como sin datos, sin inventar nada).
     """
-    df = analizar_precios(refresh=refresh)
+    df = analizar_precios(s, refresh=refresh)
     if df is None or df.empty:
-        return AnalisisXSP(
-            notas=["Sin datos de XSP: Yahoo no responde y no hay caché utilizable."]
+        return AnalisisCondor(
+            subyacente=s,
+            notas=[f"Sin datos de {s.etiqueta}: Yahoo no responde y no hay caché utilizable."],
         )
 
-    precio_cierre = float(df["XSP_Close"].iloc[-1])
-    spot, texto_fecha, nota_spot = _spot(precio_cierre)
+    precio_cierre = float(df["Close"].iloc[-1])
+    spot, texto_fecha, nota_spot = _spot(s, precio_cierre)
 
     vol = analizar_volatilidad(df)
     rangos = analizar_rangos(df)
     atr = analizar_atr(df)
-    vencimientos = analizar_opciones(spot, atr["diario"], atr["diario_hoy"], atr["semanal"])
+    vencimientos = analizar_opciones(s, spot, atr["diario"], atr["diario_hoy"], atr["semanal"])
 
     notas = [nota_spot] if nota_spot else []
     if not vencimientos:
@@ -977,14 +1146,17 @@ def analizar_xsp(refresh: bool = False) -> AnalisisXSP:
         notas.append(f"Último dato de precio: {df.index.max():%Y-%m-%d} (mercado cerrado).")
     # Honestidad sobre el percentil: la IV de los vencimientos cortos es una foto
     # del momento (Yahoo no da histórico de cadena), así que no tiene percentil.
-    notas.append("El percentil se calcula sobre el VIX: la IV de la cadena no tiene histórico.")
+    notas.append(
+        f"El percentil se calcula sobre el {s.nombre_vol}: la IV de la cadena no tiene histórico."
+    )
 
-    return AnalisisXSP(
+    return AnalisisCondor(
+        subyacente=s,
         precio=spot,
         fecha_precio=texto_fecha,
         hv=vol["hv"],
-        vix=vol["vix"],
-        vix_percentil=vol["vix_percentil"],
+        vol=vol["vol"],
+        vol_percentil=vol["vol_percentil"],
         prima_vol=vol["prima_vol"],
         vencimientos=vencimientos,
         periodos=rangos["periodos"],

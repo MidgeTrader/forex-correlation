@@ -109,10 +109,30 @@ _STRADDLE_A_SIGMA: Final[float] = 0.7979
 _IV_MIN: Final[float] = 0.01
 _IV_MAX: Final[float] = 3.0
 
-# Umbral de antigüedad del último dato para considerar la caché al día: si la
-# última sesión es anterior al penúltimo día hábil, se re-descarga (mismo
-# criterio que `bonos_motores`).
-_ULTIMO_OK: Final[pd.Timestamp] = pd.Timestamp.today().normalize() - pd.tseries.offsets.BDay(1)
+def _ultimo_esperado() -> pd.Timestamp:
+    """Última sesión que la caché de precios debe contener para darse por al día.
+
+    Estos precios no son un histórico que se consulte de vez en cuando: alimentan
+    el ATR del ciclo de 1 DTE, que por diseño incluye la sesión de HOY mientras se
+    forma (ver ``_atr_de``). Con el umbral que usaba antes —«anterior al penúltimo
+    día hábil», heredado de ``bonos_motores``— la caché se daba por buena dos días
+    seguidos, así que al abrir la aplicación con el mercado ya en sesión el 1 DTE
+    enseñaba el cierre de ayer en vez de la volatilidad del momento, que es justo
+    lo que se mira para montarlo. En día hábil se exige, por tanto, la sesión de
+    hoy (una descarga de dos tickers: segundos); en fin de semana, la del viernes,
+    que es la última que existe.
+
+    Returns:
+        Fecha (medianoche, sin zona) de la última sesión exigible. Si el mercado
+        aún no ha publicado la vela de hoy, la caché no la tendrá y se
+        re-descargará en cada arranque hasta que aparezca, sin más coste que esos
+        segundos.
+    """
+    hoy = pd.Timestamp.today().normalize()
+    if hoy.weekday() >= 5:  # sábado o domingo: la última sesión fue el viernes
+        return hoy - pd.tseries.offsets.BDay(1)
+    return hoy
+
 
 _NOMBRES_DOW: Final[dict[int, str]] = {
     0: "Lunes",
@@ -399,7 +419,7 @@ def _cache_ok(s: Subyacente) -> Optional[pd.DataFrame]:
               f"({', '.join(map(str, df.columns))}): se re-descarga.")
         return None
 
-    if df.index.max().normalize() < _ULTIMO_OK:
+    if df.index.max().normalize() < _ultimo_esperado():
         return None  # caché desactualizada → re-descargar
 
     return df.rename(columns=columnas)
@@ -766,25 +786,51 @@ def analizar_opciones(s: Subyacente, spot: float, atr_diario: Optional[ATR] = No
 # Rangos por periodo (día, semana, mes) en %
 # ---------------------------------------------------------------------------
 
-def _partir_cerrados(marco: pd.Series | pd.DataFrame,
-                     ultima_fecha: pd.Timestamp) -> pd.Series | pd.DataFrame:
+def _cierre_del_periodo(periodo: pd.Period) -> pd.Timestamp:
+    """Momento (hora de Nueva York) en que un periodo deja de estar en curso.
+
+    Es el día en que termina el periodo a la hora de cierre de la sesión regular. Un
+    día cierra ese mismo día, una semana el viernes y un mes su último día, así que
+    este único cálculo sirve para los tres. Se toma el cierre de la sesión regular
+    (16:00 ET) y no el horario extendido de los ETF: las velas diarias de Yahoo y la
+    cadena de opciones son de sesión regular.
+
+    Args:
+        periodo: Periodo de pandas cuya fecha de cierre se quiere.
+
+    Returns:
+        El instante de cierre, con zona de Nueva York. Si el periodo termina en fin
+        de semana —un mes que acaba en sábado, el caso habitual— se adelanta al
+        viernes: el sábado no hay sesión que cierre.
+    """
+    fin = periodo.end_time.normalize()
+    if fin.weekday() >= 5:
+        fin -= pd.tseries.offsets.BDay(1)
+    return pd.Timestamp.combine(fin.date(), CIERRE_MERCADO).tz_localize(ZONA_MERCADO)
+
+
+def _partir_cerrados(marco: pd.Series | pd.DataFrame) -> pd.Series | pd.DataFrame:
     """Descarta el último periodo de la serie si todavía no ha cerrado.
 
     Un periodo en curso (el mes de hoy, la semana de hoy, la sesión de hoy) está
     incompleto y arrastraría la media hacia abajo. Se excluye hasta que cierre.
 
+    El «si ha cerrado» se pregunta al reloj —¿hemos pasado ya el cierre de ese
+    periodo?— y no a los datos, que es lo que fallaba antes: se comparaba la fecha de
+    fin del periodo con la ÚLTIMA FECHA CON DATOS, dando por hecho que esa fecha era
+    hoy. Con una caché que terminaba en una sesión ya cerrada (lo normal al arrancar
+    por la mañana, antes de que Yahoo publique la vela del día) se tiraba el último
+    día bueno y las cards retrocedían una sesión de más.
+
     Args:
         marco: Serie o DataFrame (OHLC) indexado por ``Period``.
-        ultima_fecha: Última fecha con datos.
 
     Returns:
         El marco sin el periodo en curso (o tal cual si ya cerró).
     """
     if marco.empty:
         return marco
-    # ``>=`` y no ``>``: el ``end_time`` de un periodo diario normalizado es la
-    # propia fecha del día, así que con ``>`` el día en curso nunca se excluía.
-    if marco.index[-1].end_time.normalize() >= ultima_fecha:
+    if pd.Timestamp.now(tz=ZONA_MERCADO) < _cierre_del_periodo(marco.index[-1]):
         return marco.iloc[:-1]
     return marco
 
@@ -826,7 +872,6 @@ def _atr_wilder(altos: pd.Series, bajos: pd.Series, cierres: pd.Series,
 
 
 def _atr_de(df: pd.DataFrame, freq: str, etiqueta: str,
-            ultima_fecha: pd.Timestamp,
             incluir_en_curso: bool = False) -> Optional[ATR]:
     """ATR de un ciclo (día o semana) leído en su último periodo CERRADO.
 
@@ -834,7 +879,6 @@ def _atr_de(df: pd.DataFrame, freq: str, etiqueta: str,
         df: DataFrame de ``analizar_precios``.
         freq: Agrupación de pandas (``D`` para diario, ``W-FRI`` para semanal).
         etiqueta: Nombre del ATR para la card.
-        ultima_fecha: Última fecha con datos (descarta el periodo en curso).
         incluir_en_curso: True NO descarta el periodo en curso y calcula el ATR
             con la sesión de hoy dentro. Es lo que pide el ciclo de 1 DTE: un día
             volátil mueve la cifra mientras se forma, a costa de que la cifra se
@@ -856,7 +900,7 @@ def _atr_de(df: pd.DataFrame, freq: str, etiqueta: str,
         # El nombre lo dice: no es un precio más del marco.
         "Fin_Periodo": df.index.to_series().groupby(periodos).max(),
     })
-    marco = ohlc if incluir_en_curso else _partir_cerrados(ohlc, ultima_fecha)
+    marco = ohlc if incluir_en_curso else _partir_cerrados(ohlc)
     if marco.empty:
         return None
 
@@ -895,13 +939,14 @@ def analizar_atr(df: pd.DataFrame) -> dict[str, Optional[ATR]]:
         ``{"diario": ATR|None, "diario_hoy": ATR|None, "semanal": ATR|None}``.
         El diario es el de ayer al cierre (el que se ve al entrar hoy); el
         ``diario_hoy`` mete la sesión de hoy dentro y es el que usa el ciclo de
-        1 DTE; el semanal, el de la semana pasada.
+        1 DTE; el semanal, el de la semana pasada. Con el mercado ya cerrado, el
+        diario y el ``diario_hoy`` coinciden, porque la sesión de hoy ha dejado
+        de estar en curso y pasa a ser el último cierre.
     """
-    ultima = df.index.max().normalize()
     return {
-        "diario": _atr_de(df, "D", "ATR(14) diario", ultima),
-        "diario_hoy": _atr_de(df, "D", "ATR(14) diario", ultima, incluir_en_curso=True),
-        "semanal": _atr_de(df, "W-FRI", "ATR(14) semanal", ultima),
+        "diario": _atr_de(df, "D", "ATR(14) diario"),
+        "diario_hoy": _atr_de(df, "D", "ATR(14) diario", incluir_en_curso=True),
+        "semanal": _atr_de(df, "W-FRI", "ATR(14) semanal"),
     }
 
 
@@ -940,7 +985,7 @@ def _rangos_por_periodo(df: pd.DataFrame, freq: str) -> pd.Series:
     return pd.Series(filas).sort_index()
 
 
-def _excursiones_diarias(df: pd.DataFrame, ultima_fecha: pd.Timestamp) -> pd.DataFrame:
+def _excursiones_diarias(df: pd.DataFrame) -> pd.DataFrame:
     """Recorrido de cada sesión partido en lo que fue hacia arriba y hacia abajo.
 
     Mismo criterio que ``_rangos_por_periodo`` (cifras en % del cierre anterior a
@@ -951,7 +996,6 @@ def _excursiones_diarias(df: pd.DataFrame, ultima_fecha: pd.Timestamp) -> pd.Dat
 
     Args:
         df: DataFrame de ``analizar_precios``.
-        ultima_fecha: Última fecha con datos (descarta la sesión en curso).
 
     Returns:
         DataFrame indexado por periodo diario con tres columnas en %:
@@ -966,7 +1010,7 @@ def _excursiones_diarias(df: pd.DataFrame, ultima_fecha: pd.Timestamp) -> pd.Dat
         "previo": df["Close"].shift(1).groupby(periodos).last(),
     }).dropna()
     tabla = tabla[tabla["previo"] > 0]  # sin referencia previa no hay % honesto
-    tabla = _partir_cerrados(tabla, ultima_fecha)
+    tabla = _partir_cerrados(tabla)
     if tabla.empty:
         return tabla
 
@@ -1014,16 +1058,14 @@ def analizar_rangos(df: pd.DataFrame) -> dict:
         (lunes a viernes, con las dos excursiones y su suma) y ``por_dia_mes``
         (ordenado de mayor a menor rango).
     """
-    ultima = df.index.max().normalize()
-
     def fin_de(freq: str) -> pd.Series:
         """Última fecha de sesión de cada periodo de la frecuencia dada."""
         return df.index.to_series().groupby(df.index.to_period(freq)).max()
 
     fin_d, fin_w, fin_m = fin_de("D"), fin_de("W-FRI"), fin_de("M")
-    diarios = _partir_cerrados(_rangos_por_periodo(df, "D"), ultima)
-    semanales = _partir_cerrados(_rangos_por_periodo(df, "W-FRI"), ultima)
-    mensuales = _partir_cerrados(_rangos_por_periodo(df, "M"), ultima)
+    diarios = _partir_cerrados(_rangos_por_periodo(df, "D"))
+    semanales = _partir_cerrados(_rangos_por_periodo(df, "W-FRI"))
+    mensuales = _partir_cerrados(_rangos_por_periodo(df, "M"))
 
     # Desglose por día de la semana, partido en los dos lados: media de lo que
     # fue hacia arriba, media de lo que fue hacia abajo y su suma. Las tres
@@ -1031,7 +1073,7 @@ def analizar_rangos(df: pd.DataFrame) -> dict:
     # lineal; con medianas no sumarían y habría que advertirlo en la card.
     por_dow: list[tuple[str, float, float, float]] = []
     por_dia_mes: list[tuple[int, float]] = []
-    excursiones = _excursiones_diarias(df, ultima)
+    excursiones = _excursiones_diarias(df)
     if not excursiones.empty:
         tabla_dow = excursiones.groupby(excursiones.index.dayofweek).mean()
         por_dow = [
